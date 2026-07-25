@@ -195,6 +195,14 @@ create table public.question_version (
   latex_valid boolean not null default false,
 
   status public.question_status not null default 'DRAFT',
+
+  -- AC-SEC-01: a student token scripting the API directly must not be able to
+  -- enumerate the items of a paper whose window has not closed. An item drawn
+  -- into a ranked mock is embargoed from the practice bank until that test
+  -- ends; the policy predicate is this column on the row itself, so no join and
+  -- no per-row subquery is needed. Set by trigger in 0007, never by hand.
+  embargoed_until timestamptz,
+
   created_by uuid not null references auth.users (id) on delete restrict,
   approved_by uuid references auth.users (id) on delete restrict,
   approved_at timestamptz,
@@ -241,6 +249,9 @@ create index question_version_sub_topic_idx on public.question_version (org_id, 
   where status = 'PUBLISHED';
 create index question_version_published_idx on public.question_version (org_id, status)
   where status = 'PUBLISHED';
+-- Indexed because the serving policy tests it on every practice read.
+create index question_version_embargo_idx on public.question_version (embargoed_until)
+  where embargoed_until is not null;
 create index question_version_stimulus_idx on public.question_version (stimulus_id)
   where stimulus_id is not null;
 create index question_version_plain_text_trgm_idx

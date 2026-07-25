@@ -557,6 +557,114 @@ create trigger attempt_deadline_extension_apply
   for each row execute function app.tg_apply_deadline_extension();
 
 /* ------------------------------------------------------------------ *
+ * Paper fetch (NFR-SCL-02, FR-TST-10, FR-SYN-11)
+ *
+ * One round trip. Attempt start returning the attempt row and then the client
+ * fetching stems, then options, then assets is the multi-call paper fetch the
+ * requirements prohibit -- at ten thousand concurrent starts it is four
+ * simultaneous thundering herds instead of one.
+ *
+ * This is also the only path to an item embargoed out of the practice bank, so
+ * a candidate reads their own live paper and nobody reads anyone else's.
+ * ------------------------------------------------------------------ */
+
+create function public.get_attempt_paper(p_attempt_id uuid)
+returns table (
+  question_version_id uuid,
+  display_index integer,
+  test_section_id uuid,
+  section_ordinal integer,
+  section_name text,
+  subject public.subject_code,
+  question_type public.question_type,
+  body_html text,
+  body_mathml text,
+  plain_text text,
+  alt_text text,
+  spoken_text text,
+  stimulus_html text,
+  -- Option identities in this attempt's persisted order (FR-ATT-10). Positions
+  -- are a rendering detail; the client answers with the identity.
+  option_ids uuid[],
+  option_html text[],
+  max_marks numeric,
+  section_locked boolean
+)
+language plpgsql stable
+security definer
+set search_path = ''
+as $$
+declare
+  v_user uuid := auth.uid();
+  v_attempt public.attempt;
+begin
+  if v_user is null or not app.processing_allowed() then
+    return;
+  end if;
+
+  select * into v_attempt from public.attempt a
+   where a.id = p_attempt_id and a.user_id = v_user;
+  if not found then
+    return;
+  end if;
+
+  return query
+  with ordered as (
+    select u.qvid, u.ord::integer as display_index
+    from unnest(v_attempt.question_order) with ordinality as u(qvid, ord)
+  )
+  select o.qvid,
+         o.display_index,
+         ts.id,
+         ts.ordinal,
+         ts.name,
+         ts.subject,
+         qv.question_type,
+         qv.body_html,
+         qv.body_mathml,
+         qv.plain_text,
+         qv.alt_text,
+         qv.spoken_text,
+         st.body_html,
+         coalesce(shuffled.ids, authored.ids),
+         coalesce(shuffled.html, authored.html),
+         tq.max_marks,
+         -- FR-SYN-11: prefetch scope equals what the candidate may legally
+         -- navigate to right now. A locked section is reported so the client
+         -- can drop its content rather than hold the whole paper.
+         (asec.locked_at is not null)
+  from ordered o
+  join public.test_question tq
+    on tq.test_id = v_attempt.test_id and tq.question_version_id = o.qvid
+  join public.question_version qv on qv.id = o.qvid
+  join public.test_section ts on ts.id = tq.test_section_id
+  left join public.attempt_section asec
+    on asec.attempt_id = p_attempt_id and asec.test_section_id = ts.id
+  left join public.question_stimulus st on st.id = qv.stimulus_id
+  left join lateral (
+    select array_agg(qo.id order by x.ord) as ids,
+           array_agg(qo.body_html order by x.ord) as html
+    from jsonb_array_elements_text(v_attempt.option_order -> o.qvid::text)
+         with ordinality as x(oid_text, ord)
+    join public.question_option qo on qo.id = x.oid_text::uuid
+  ) shuffled on true
+  left join lateral (
+    select array_agg(qo.id order by qo.ordinal) as ids,
+           array_agg(qo.body_html order by qo.ordinal) as html
+    from public.question_option qo
+    where qo.question_version_id = o.qvid
+  ) authored on true
+  order by o.display_index;
+end;
+$$;
+
+comment on function public.get_attempt_paper(uuid) is
+  'The whole paper in one call (NFR-SCL-02), rendered from the attempt persisted order rather than from live item rows, so a resume, a reinstall and the post-submission review all produce identical output (FR-ATT-11, AC-ATT-05). Returns no solution, no rationale, no key and no video URL -- those are not in any table it reads.';
+
+revoke execute on function public.get_attempt_paper(uuid) from public;
+grant execute on function public.get_attempt_paper(uuid) to authenticated;
+
+/* ------------------------------------------------------------------ *
  * Batch response sync (FR-SYN-02, FR-SYN-03, FR-SYN-04)
  *
  * The only supported write path for attempt_response. It exists in the database

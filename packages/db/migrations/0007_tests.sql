@@ -438,6 +438,42 @@ create trigger test_question_frozen
   before insert or update or delete on public.test_question
   for each row execute function app.tg_test_composition_frozen();
 
+/* ------------------------------------------------------------------ *
+ * Practice-bank embargo (AC-SEC-01, NFR-SEC-08)
+ *
+ * An item drawn into a ranked mock must not remain browsable in the free
+ * practice bank while the paper is live -- otherwise a student scripts the
+ * bank, finds the paper, and the leaderboard is fiction. The embargo is a
+ * column on question_version so the serving policy stays a predicate over the
+ * row, with no join and no subquery per row.
+ * ------------------------------------------------------------------ */
+
+create function app.tg_embargo_paper_items() returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_kind public.test_kind;
+  v_ends timestamptz;
+begin
+  select t.kind, t.ends_at into v_kind, v_ends from public.test t where t.id = new.test_id;
+
+  if v_kind = 'RANKED_MOCK' and v_ends is not null then
+    -- greatest() so an item in two overlapping papers keeps the later embargo.
+    update public.question_version qv
+       set embargoed_until = greatest(coalesce(qv.embargoed_until, v_ends), v_ends)
+     where qv.id = new.question_version_id;
+  end if;
+
+  return new;
+end;
+$$;
+
+create trigger test_question_embargo
+  after insert on public.test_question
+  for each row execute function app.tg_embargo_paper_items();
+
 create trigger test_section_frozen
   before insert or update or delete on public.test_section
   for each row execute function app.tg_test_composition_frozen();

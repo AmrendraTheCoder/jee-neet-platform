@@ -1,0 +1,209 @@
+.review {
+  max-width: 62rem;
+}
+
+.score-summary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  background: var(--surface);
+  border: var(--border-hairline) solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+}
+
+.score-summary__headline {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: var(--space-5);
+}
+
+.score-summary__figure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.score-summary__label {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-subtle);
+}
+
+.score-summary__value {
+  font-size: var(--text-3xl);
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.score-summary__max {
+  font-size: var(--text-lg);
+  color: var(--fg-muted);
+  font-weight: 400;
+}
+
+.review-question {
+  background: var(--surface);
+  border: var(--border-hairline) solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.review-question__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+/* The marks breakdown is the most prominent element on a reviewed question,
+   deliberately: it is the product's headline differentiator (FR-SCR-18). */
+.marks {
+  border: var(--border-hairline) solid var(--border);
+  border-inline-start-width: 5px;
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  background: var(--surface-sunken);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.marks--success {
+  border-inline-start-color: var(--success);
+  background: var(--success-soft);
+}
+.marks--warning {
+  border-inline-start-color: var(--warning);
+  background: var(--warning-soft);
+}
+.marks--danger {
+  border-inline-start-color: var(--danger);
+  background: var(--danger-soft);
+}
+.marks--info {
+  border-inline-start-color: var(--accent);
+  background: var(--accent-soft);
+}
+.marks--neutral {
+  border-inline-start-color: var(--border-strong);
+}
+
+.marks__head {
+  display: flex;
+  gap: var(--space-4);
+  align-items: flex-start;
+}
+
+.marks__value {
+  font-size: var(--text-3xl);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  min-inline-size: 3.5rem;
+}
+
+.marks__headline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-inline-size: 0;
+}
+
+.marks__server-note {
+  font-size: var(--text-sm);
+  color: var(--fg);
+}
+
+.marks__scheme summary {
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  min-block-size: var(--target-min);
+  display: flex;
+  align-items: center;
+}
+
+.marks__scheme ul {
+  margin: 0 0 var(--space-3);
+  padding-inline-start: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+}
+
+.review-options {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.review-option {
+  border: var(--border-hairline) solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.review-option--correct {
+  border-color: var(--success);
+  background: var(--success-soft);
+}
+.review-option--wrong {
+  border-color: var(--danger);
+  background: var(--danger-soft);
+}
+.review-option--chosen {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.review-option__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.review-option__rationale {
+  font-size: var(--text-sm);
+  color: var(--fg-muted);
+  border-inline-start: 2px solid var(--border-strong);
+  padding-inline-start: var(--space-3);
+}
+
+.review-numeric {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: var(--space-4);
+  margin: 0;
+}
+.review-numeric dt {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-subtle);
+}
+.review-numeric dd {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+
+.review-solution summary {
+  cursor: pointer;
+  font-weight: 600;
+  min-block-size: var(--target-min);
+  display: flex;
+  align-items: center;
+}
