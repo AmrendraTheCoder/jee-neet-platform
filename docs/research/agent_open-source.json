@@ -1,0 +1,276 @@
+{
+ "summary": "Licence risk is the dominant constraint: nearly every mature open-source assessment platform is copyleft \u2014 Moodle GPLv3+, Canvas LMS AGPLv3, Open edX AGPL, TAO CE AGPLv3, TCExam AGPL-3.0-or-later, Frappe LMS AGPL-3.0, ILIAS GPL, Rog\u014d/ExamSys GPLv3, DOMjudge GPLv2+, Anki AGPL-3.0. For a closed-source Supabase-backed SaaS, AGPL is the hard blocker (network use triggers source disclosure), so these should be treated as *study* references (schema, state machines, behaviours) rather than *adopt*, and no code copied. The permissively-licensed pieces that are genuinely adoptable are the algorithm libraries and players: ts-fsrs (MIT, FSRS-6, Node>=20), fsrs-rs (BSD-3, has the parameter optimiser), py-fsrs (MIT, optimiser via extra), catsim (BSD-3, CAT engine), py-irt (MIT, Pyro/PyTorch 1PL/2PL/4PL), girth (MIT, 1PL/2PL/3PL + GRM/PCM), amp-up-io qti3-item-player (MIT), h5p-standalone (MIT), PyLTI1p3 (MIT), Elo-MMR (MIT, includes a Codeforces-rating implementation), openskill.py (MIT), CTFd (Apache-2.0), OpenOLAT (Apache-2.0), Moodle App (Apache-2.0 \u2014 the best legally-safe reference for offline mobile quiz attempt sync), Safe Exam Browser (MPL-2.0, file-level copyleft, linkable). On interchange formats, QTI 3.0 is the only forward-looking standard (QTI 2.1 legacy, 1.x deprecated) but is heavy; Moodle XML is the pragmatic import/export target for Indian coaching-content pipelines because it round-trips images, feedback and LaTeX, with GIFT/Aiken as cheap bulk-authoring text formats. xAPI 1.0.3 ratified as IEEE 9274.1.1-2023 is the analytics event model to emit; Caliper is a parallel 1EdTech framework, SCORM is irrelevant for a native app. For adaptivity, full 3PL IRT calibration is impractical at cold start; Elo/Glicko-style online difficulty rating (well-documented in the adaptive-learning literature, used by Duolingo-class systems) converges fast, is O(1) per response, and can be back-filled with offline 2PL/3PL calibration via girth/py-irt once each item has ~200-500 responses. Spaced repetition maps onto a question bank by treating (student, question) or (student, sub-topic) as the \"card\" and using FSRS-6; benchmarks over ~727M Anki reviews show FSRS-5 log-loss 0.291 / RMSE 5.3% vs SM-2 0.354 / 16.2%. Mobile anti-cheat is asymmetric: iOS gives a real primitive (AutomaticAssessmentConfiguration / AEAssessmentSession, app self-lock), Android needs Lock Task Mode which requires Device Owner \u2014 unattainable for a consumer BYOD app, so plan on soft signals (app-state, screenshot blocking, Play Integrity/App Attest) rather than hard kiosk.",
+ "findings": [
+  {
+   "title": "Moodle question engine \u2014 the reference state machine for attempts (GPLv3+, study only)",
+   "detail": "Moodle is GPLv3+. Its question engine models every attempt as a question_attempt containing an ordered list of question_attempt_steps (each step = one interaction, with its own state, fraction and submitted data), separating question *type* from question *behaviour*. Shipped behaviours: Deferred feedback, Deferred feedback with CBM (certainty-based marking: 3 certainty bands <67% / >67% / >80%, a correct answer at lowest certainty scores 0.33 instead of 1), Immediate feedback, Immediate feedback with CBM, Interactive with multiple tries (tries = number of hints + 1), Adaptive mode, Adaptive mode (no penalties), Manually graded. Contributed behaviours exist (qbehaviour_adaptiveallnothing, qbehaviour_adaptivemultipart). Moodle 5.0 (Apr 2025) shipped a major Question Bank redesign \u2014 multiple question banks per course, questions authored inside a quiz stay scoped to that quiz; Moodle 5.1 released 2025-10-06, Moodle 5.2 released 2026-04-20.",
+   "implication": "Copy the *design*, never the code: model our attempt table as append-only steps (attempt -> question_attempt -> step) so a server-authoritative timer, resume-after-crash, partial answers and audit trail all fall out for free. Adopt 3-4 behaviours only: deferred feedback (mock tests), immediate feedback (practice), interactive-with-tries (learning mode). CBM is a genuinely differentiating feature for JEE/NEET negative marking psychology and is cheap to implement.",
+   "confidence": "high",
+   "source": "https://docs.moodle.org/501/en/Question_behaviours"
+  },
+  {
+   "title": "TAO (Open Assessment Technologies) \u2014 the only QTI-native OSS assessment stack; AGPLv3",
+   "detail": "TAO Community Edition core is AGPLv3. Repos: github.com/oat-sa (package-tao, lib-tao-qti and ~100 extensions), plus github.com/tao-ce/tao-ce for the CE distribution. PHP-based, QTI + LTI standards-based, used by large national/international assessment programmes (PISA-class).",
+   "implication": "AGPL = do not vendor, do not fork into our backend. Study its QTI item model and outcome-processing/response-processing design if we ever need QTI import. For actually rendering QTI in the app, use the MIT-licensed amp-up-io player instead of TAO.",
+   "confidence": "high",
+   "source": "https://www.taotesting.com/products/tao-core/"
+  },
+  {
+   "title": "TCExam \u2014 closest single-purpose OSS CBT engine to our use case, but AGPL-3.0-or-later",
+   "detail": "github.com/tecnickcom/tcexam. Licence AGPL-3.0-or-later, copyright 2004-2026 Nicola Asuni / Tecnick.com. Actively maintained (594 commits, CI on PHP 8.2/8.3/8.4; MySQL/MariaDB, PostgreSQL, Oracle). Directly relevant features: LaTeX and MathML formula support in questions, random question and answer shuffling per candidate, timed exams, TSV/XML import-export, OMR paper scanning, 26 languages, LDAP/RADIUS/CAS auth.",
+   "implication": "Best single reference for 'CBT engine with heavy maths' semantics (question shuffling, per-candidate ordering, LaTeX in stems). AGPL blocks reuse of code. Its TSV/XML import schema is a useful shape to imitate for our admin bulk-upload format.",
+   "confidence": "high",
+   "source": "https://github.com/tecnickcom/tcexam"
+  },
+  {
+   "title": "Canvas LMS AGPLv3, Open edX AGPL, Frappe LMS AGPL-3.0, ILIAS GPL, Rog\u014d/ExamSys GPLv3, OpenOLAT Apache-2.0, Sakai ECL-2.0",
+   "detail": "Canvas (github.com/instructure/canvas-lms, 6.7k stars, ~78.8k commits, Ruby/Rails + Postgres + Redis) is AGPLv3. Open edX is AGPL with some Apache-2.0 components; latest named release Verawood, 22nd community release, 2026-06-09, covering changes 2025-10-30 to 2026-04-09; the Open edX community itself documents 'Dependency Licensing Problems' from AGPL incompatibility. Frappe LMS (github.com/frappe/lms, 3.1k stars, Frappe Framework + Vue) is AGPL-3.0 and has quizzes with multiple question formats. ILIAS is GPL (open-sourced 2000). Rog\u014d (now ExamSys, University of Nottingham, rogo-oss.nottingham.ac.uk / examsys-oss.nottingham.ac.uk) is GPLv3 \u2014 purpose-built e-assessment incl. summative exams and item analysis. OpenOLAT (github.com/OpenOLAT/OpenOLAT) is Apache-2.0. Sakai is Educational Community License 2.0 (Apache-2.0 derivative).",
+   "implication": "Only OpenOLAT (Apache-2.0) and Sakai (ECL-2.0) are legally safe to lift code from \u2014 but both are large Java monoliths and a poor fit for a Supabase/RN stack, so realistically all of these are 'study'. ExamSys is the highest-signal study target for summative exam workflow + post-hoc item analysis despite GPLv3.",
+   "confidence": "high",
+   "source": "https://github.com/instructure/canvas-lms"
+  },
+  {
+   "title": "QTI 3.0 is the only forward-looking interchange standard; QTI 2.1 is legacy, 1.x deprecated",
+   "detail": "1EdTech QTI 3.0 is current and stable; QTI 1.0/1.1 are deprecated and 2.x superseded (QTI Result Reporting 3.0 supersedes 2.x). QTI 3 mandates modern W3C tech \u2014 HTML5, MathML 3, WCAG 2.0, WAI-ARIA 1.0, SSML 1.1, CSS3 \u2014 and targets 'user experience interoperability' so items render identically across delivery systems. LMS support is still uneven in 2025-2026.",
+   "implication": "Do NOT make QTI 3 the internal storage format \u2014 it is XML-heavy and would fight our Postgres/JSONB + LaTeX model. Treat it as an export/import adapter built later, only if we need to ingest publisher content or sell content to institutions. MathML 3 is the QTI maths carrier, so keep a LaTeX->MathML conversion path in mind.",
+   "confidence": "high",
+   "source": "https://www.imsglobal.org/spec/qti/v3p0/oview"
+  },
+  {
+   "title": "amp-up-io qti3-item-player \u2014 MIT-licensed QTI 3 renderer, the practical QTI on-ramp",
+   "detail": "github.com/amp-up-io/qti3-item-player (Vue 2.6) and github.com/amp-up-io/qti3-item-player-vue3 (Vue 3), both MIT. npm qti3-item-player v1.1.20. Roadmap targets QTI 3 Delivery System 'Basic' + 'Advanced' conformance plus PCI (Portable Custom Interactions) support; sibling qti3-stimulus-player for shared stimulus. Alternative: github.com/agencyenterprise/qti-3-player, framework-agnostic JS/TS, npm-installable.",
+   "implication": "If we ever need to render third-party QTI 3 items in the RN app, embed one of these MIT players inside a WebView rather than writing a QTI renderer. MIT means we can fork and strip it. Verdict: study now, adopt only if a QTI content deal appears.",
+   "confidence": "high",
+   "source": "https://github.com/amp-up-io/qti3-item-player"
+  },
+  {
+   "title": "Moodle XML is the pragmatic import/export target; GIFT and Aiken are the cheap bulk-authoring formats",
+   "detail": "Moodle's question bank imports Aiken, Blackboard, Blackboard V6+, Embedded Answers (Cloze), Examview, GIFT, Learnwise, Missing Word, Moodle XML, WebCT; exports GIFT, Moodle XML, XHTML, Word 2010 table format. Moodle's own docs call Moodle XML 'the recommended import question type format' because it carries the maximum question data including per-answer feedback. GIFT is plain-text and covers MCQ, true/false, short answer, matching, missing-word and numerical. Aiken is the simplest \u2014 MCQ only, human-readable text.",
+   "implication": "Ship in this order: (1) a first-class CSV/JSON admin bulk format of our own with explicit LaTeX fields and image URLs; (2) GIFT import for coaching-centre teachers who already have Moodle habits (cheap parser, ~300 LOC); (3) Moodle XML import/export for interoperability and as a migration escape hatch. Skip Aiken (subset of GIFT), skip Blackboard/WebCT, skip QTI until a real customer asks.",
+   "confidence": "high",
+   "source": "https://docs.moodle.org/502/en/GIFT_format"
+  },
+  {
+   "title": "H5P is MIT at the core but the PHP library is contaminated with GPL third-party code",
+   "detail": "h5p.org states 'The H5P software is licenced under the MIT license' (Joubel AS, 2015), but H5P's own licensing page admits third-party input-purification code (CKEditor4-derived and external XSS-protection code) inside the H5P PHP Library forces GPL on that component, and that H5P intends to make the GPL code optional. h5p-standalone (github.com/tunapanda/h5p-standalone) \u2014 which renders H5P content with no H5P server \u2014 is cleanly MIT. H5P has 50+ content types and integrates via LTI 1.3 across Canvas/Brightspace/Blackboard/Moodle/Totara.",
+   "implication": "If we use H5P at all, use h5p-standalone (MIT) in a WebView and never the PHP library. Realistically: ignore H5P. Its interaction types are web-desktop-shaped, and we need native RN interactions with LaTeX, not an HTML5 authoring ecosystem.",
+   "confidence": "high",
+   "source": "https://h5p.org/licensing"
+  },
+  {
+   "title": "xAPI 1.0.3 is now IEEE 9274.1.1-2023 \u2014 the analytics event model to emit; Caliper is a parallel, not competing, spec",
+   "detail": "xAPI 1.0.3 was ratified as IEEE 9274.1.1-2023 (sometimes called xAPI 2.0), the first open-source e-learning spec to become an IEEE standard; the 2023 version tightens the JSON data model and RESTful LRS service rather than redesigning it, so 1.0.3 content keeps working, and adds contextAgents. 1EdTech's own position is that xAPI and Caliper are not equivalent and adoption is 'horses-for-courses' \u2014 xAPI replaces SCORM/IEEE CMI runtime tracking, Caliper is the 1EdTech Learning Analytics Framework. SCORM is LMS-bound packaging and irrelevant to a native app.",
+   "implication": "Adopt the xAPI *statement shape* (actor/verb/object/result/context) as our internal analytics event schema even if we never run an LRS \u2014 verbs like answered, attempted, completed, mastered map perfectly onto question attempts, and it future-proofs institutional integrations. Ignore SCORM entirely. Ignore Caliper unless an Indian university partner demands it. LTI 1.3 only matters if we become a tool inside someone else's LMS \u2014 PyLTI1p3 (MIT, github.com/dmitry-viskov/pylti1.3, Django/Flask adapters) is the reference if so.",
+   "confidence": "high",
+   "source": "https://standards.ieee.org/ieee/9274.1.1/7321/"
+  },
+  {
+   "title": "ts-fsrs (MIT) is the direct adopt for spaced repetition in a TS/RN + Edge Function stack",
+   "detail": "github.com/open-spaced-repetition/ts-fsrs \u2014 MIT, 724 stars, implements FSRS-6, ESM/CJS/UMD, requires Node >= 20. Companion package @open-spaced-repetition/binding provides the optimiser: trains the 21-weight FSRS parameter vector from review logs and converts CSV. Active CI/CD, low open-issue count (2 issues / 4 PRs).",
+   "implication": "ADOPT. Runs identically in an Expo/RN client (for optimistic next-due computation) and in a Supabase Edge Function (for authoritative scheduling). MIT means zero licence friction. Store the 21-parameter vector per-student (or per-cohort until enough data), plus stability/difficulty/state/last_review on each (student, item) row.",
+   "confidence": "high",
+   "source": "https://github.com/open-spaced-repetition/ts-fsrs"
+  },
+  {
+   "title": "fsrs-rs (BSD-3) and py-fsrs (MIT) cover the training/optimiser side; Anki itself is AGPL-3.0",
+   "detail": "github.com/open-spaced-repetition/fsrs-rs \u2014 BSD-3-Clause, 398 stars, 353 commits, exposes compute_parameters() to train FSRS parameters from review logs, SM-2 migration helpers, simulation, and an experimental Cost-ADR policy optimiser; bindings for C, Python, Node.js, Dart, PHP. github.com/open-spaced-repetition/py-fsrs \u2014 MIT, 455 stars, Python 3.10+, optimiser via `pip install \"fsrs[optimizer]\"`, JSON serialisation of Card/Scheduler. FSRS-Kotlin is MIT. Anki itself (github.com/ankitects/anki, 29.3k stars) is AGPL-3.0-or-later with BSD-3 contributions and MIT/Apache-2.0 vendored bits (MathJax is Apache-2.0) \u2014 its Rust scheduler lives in rslib.",
+   "implication": "Use ts-fsrs at runtime, fsrs-rs or py-fsrs in a nightly GCP batch job to re-fit parameters from accumulated review logs. Anki is AGPL \u2014 read the rslib scheduler for understanding, copy nothing. Note Anki bundles MathJax (Apache-2.0) which is also a safe LaTeX renderer choice for us.",
+   "confidence": "high",
+   "source": "https://github.com/open-spaced-repetition/fsrs-rs"
+  },
+  {
+   "title": "FSRS beats SM-2 decisively on a ~727M-review benchmark \u2014 quantified",
+   "detail": "open-spaced-repetition/srs-benchmark: ~727M reviews from ~10,000 Anki users, ~349.9M reviews used after filtering outliers and same-day reviews. Reported: SM-2 log-loss 0.354 and retention RMSE 16.2% vs FSRS-5 log-loss 0.291 and RMSE 5.3%. FSRS-6 adds 2 parameters over FSRS-5 (one for same-day reviews, one controlling forgetting-curve shape) and shows 83.3% superiority over SM-17 across collections. Best-in-class in the benchmark is an RWKV neural model (log-loss 0.2773\u00b10.0036, AUC 0.8329\u00b10.0017) \u2014 i.e. FSRS is near the practical ceiling. Practitioner guidance: FSRS needs ~20-30% fewer reviews than SM-2 for equal retention; desired retention 0.80-0.95, 0.90 default.",
+   "implication": "Do not implement SM-2. Go straight to FSRS-6 with desired_retention configurable per student and raised (0.92-0.95) as the exam date approaches \u2014 an 'exam mode' that compresses intervals to guarantee recall on a fixed date (JEE Main Jan/Apr, NEET May, Advanced May) is a real product feature, not a gimmick.",
+   "confidence": "high",
+   "source": "https://github.com/open-spaced-repetition/srs-benchmark"
+  },
+  {
+   "title": "Applying SRS to a question bank: the 'card' should be the concept, not the MCQ",
+   "detail": "No peer-reviewed study found applying FSRS to competitive-exam MCQ banks specifically (unverified \u2014 treat as design judgement). Practical constraints: an MCQ is burned after 1-2 exposures (answer memorised, not concept), whereas FSRS assumes a stable item repeatedly re-tested. FSRS's 4-grade input (Again/Hard/Good/Easy) has no natural MCQ analogue. Practitioner writeups describe exam-prep mode as 'recall reliability over a fixed 6-12 week horizon with moderate-to-high retention targets and strict daily completion'.",
+   "implication": "Model the FSRS card as (student_id, sub_topic_id) or (student_id, concept_id), not (student_id, question_id). When a sub-topic comes due, serve a *fresh* unseen question of matching difficulty from that sub-topic. Derive the FSRS grade from outcome + time: correct & fast = Easy, correct & slow (>1.5x median) = Good, correct-after-flag or near-miss = Hard, wrong or timed-out = Again. Keep a separate per-question 'seen' ledger so questions are not repeated. This is the single highest-leverage differentiator vs Indian incumbents (Allen/Physics Wallah/Unacademy), none of which expose true SRS scheduling.",
+   "confidence": "medium",
+   "source": "https://github.com/open-spaced-repetition/awesome-fsrs"
+  },
+  {
+   "title": "IRT libraries: py-irt (MIT), girth (MIT), catsim (BSD-3) \u2014 all permissive, all Python",
+   "detail": "py-irt (github.com/nd-ball/py-irt, MIT, 170 stars, 255 commits): Bayesian IRT via variational inference on Pyro/PyTorch, GPU-accelerated, supports 1PL/2PL/4PL with 3PL 'in the pipeline'; paper arXiv:2203.01282. girth (github.com/eribean/girth, MIT, 123 stars, 180 commits): Rasch/1PL/2PL/3PL dichotomous, Graded Response/Partial Credit/Graded Unfolding polytomous, multidimensional 2PL and GRM, JML/CML/MML estimation, ability estimation via ML/MAP/EAP, bootstrap CIs, polychoric correlations, missing-data support (bootstrap does not support 3PL or GGUM). catsim (github.com/douglasrizzo/catsim, BSD-3-Clause, Python 3.11+): reusable CAT engine with test initialisation, item selection, ability estimation and stopping rules, plus simulation; paper arXiv:1707.03012.",
+   "implication": "ADOPT girth for offline batch calibration (it is the most complete for classic 2PL/3PL and polytomous), py-irt if we ever need GPU-scale joint estimation, catsim to *simulate* an adaptive test policy before shipping one. All three are permissive \u2014 run them in a scheduled GCP job that writes a/b/c parameters back into Postgres. Do not attempt real-time IRT in Edge Functions.",
+   "confidence": "high",
+   "source": "https://github.com/eribean/girth"
+  },
+  {
+   "title": "How GRE/GMAT-style adaptive difficulty and 'predicted score' actually work",
+   "detail": "IRT + CAT is the dominant methodology behind GMAT, NCLEX, NREMT, ASVAB. Mechanism: a large item pool is calibrated on a pretest sample to fix item parameters; for a live candidate the item parameters are held fixed and only theta (ability) is solved for, typically updated after each response by Expected A Posteriori (EAP) with a standard normal prior over the full response pattern. Item selection maximises the item information function at the current theta estimate \u2014 the item expected to shrink the standard error most. Termination is when SE(theta) drops below a threshold, so a CAT reaches a given precision in far fewer items than a fixed-length test. 'Predicted score' is just theta mapped through the score-scale conversion of the target exam.",
+   "implication": "Our 'predicted JEE/NEET rank' feature = estimate theta per subject from responses on calibrated items, then map theta -> raw marks -> percentile using historical JEE/NEET cutoff tables. It does NOT require serving an adaptive test \u2014 it works on fixed mock tests too, which is the safer v1. Do adaptive *practice* (Elo-driven next-question) before adaptive *tests* (CAT), because CAT needs a well-calibrated pool with 3PL guessing parameters and exposure control.",
+   "confidence": "high",
+   "source": "https://assess.com/computerized-adaptive-testing/"
+  },
+  {
+   "title": "Elo-based item difficulty is the practical cold-start alternative to IRT at our scale",
+   "detail": "Elo for adaptive assessment is well established: Pel\u00e1nek, 'Applications of the Elo rating system in adaptive educational systems' (Computers & Education, 2016) concludes Elo is 'simple, robust, and effective' for adaptive educational systems; a 2016 study shows combining IRT with Elo yields estimates for both learner ability and item difficulty and recommends it specifically for practice systems where measurement duration is unimportant. 2025-2026 literature refines it: 'Psychometrics of an Elo-based large-scale online learning system' (Computers & Education: AI, 2025); Bolsinova et al., 'Keeping Elo alive' (Br. J. Math. Stat. Psychol., 2026) critiques Elo's measurement properties; a 2025 UMUAI paper investigates dynamic K-value approaches to balance stability vs flexibility.",
+   "implication": "ADOPT Elo for v1. One UPDATE per response, O(1), no batch job, converges in tens of responses per item, works from day one with zero calibration data. Use a decaying K (high K for items with <50 responses, low K after) per the 2025 dynamic-K work. Keep student rating per (subject, chapter) not global. Then run girth/py-irt monthly to produce proper 2PL parameters for items with >=200-500 responses and use those for the predicted-score model. This dual-track (Elo online + IRT offline) is the right architecture for 10k concurrent students.",
+   "confidence": "high",
+   "source": "https://www.sciencedirect.com/science/article/abs/pii/S036013151630080X"
+  },
+  {
+   "title": "Elo-MMR (MIT) ships a Codeforces-rating implementation; openskill.py (MIT) and skillratings (Rust) cover the rest",
+   "detail": "github.com/EbTech/Elo-MMR \u2014 MIT (except a deprecated C++ TrueSkill dir), Rust, implements Glicko all-pairs, BAR BT-all-pairs, Codeforces, Topcoder, TrueSkill-SPb and the Elo-MMR system itself; designed for multi-player *contests* (thousands of participants ranked in one event), which is exactly the shape of a mock-test leaderboard. github.com/vivekjoshy/openskill.py \u2014 MIT, 363 stars, 5 rating models incl. Plackett-Luce/Weng-Lin, 100% test coverage, C-compiled wheels, faster than TrueSkill (arXiv:2401.05451). github.com/atomflunder/skillratings \u2014 Rust, Elo/Glicko-2/TrueSkill and more. TrueSkill itself is patent-encumbered by Microsoft \u2014 openskill exists precisely to avoid that.",
+   "implication": "For a 10,000-student mock test, a single test is one multi-player contest, so Codeforces-style or Elo-MMR ranking is a better fit than pairwise Elo for the *leaderboard rating*. Keep the item-difficulty Elo and the student-contest rating as two separate systems. AVOID TrueSkill (patent); openskill.py is the clean MIT substitute.",
+   "confidence": "high",
+   "source": "https://github.com/EbTech/Elo-MMR"
+  },
+  {
+   "title": "CTFd (Apache-2.0) is the licence-clean contest reference; DOMjudge (GPLv2+) is the scale reference",
+   "detail": "CTFd (github.com/CTFd/CTFd) \u2014 Apache-2.0, 6.8k stars, 2.7k forks, 1,716 commits, Python/Flask + MySQL/Postgres + Redis for caching and queues, Docker Compose deploy, dynamic scoring, team competitions, tie resolution, plugin/theme architecture. Third-party 2026 assessment: CTFd handles events reliably under ~1,000 concurrent participants out of the box \u2014 i.e. an order of magnitude below our 10,000 target without work. DOMjudge (github.com/DOMjudge/domjudge, docs v8.2.x) is GPLv2-or-later and powers many ICPC regionals and acts as backup at the ICPC World Finals \u2014 its judgehost/queue separation is the proven concurrent-contest architecture.",
+   "implication": "Study CTFd's dynamic-scoring and freeze/scoreboard-caching patterns (Apache-2.0, safe to copy). Note explicitly that CTFd's stock architecture is a ~1k-concurrent design \u2014 do not treat 'CTFd scales' as evidence for our 10k target. Steal DOMjudge's idea of decoupling submission intake from grading via a queue: writes go to Postgres/Redis fast, scoring and leaderboard materialisation happen asynchronously.",
+   "confidence": "medium",
+   "source": "https://github.com/CTFd/CTFd"
+  },
+  {
+   "title": "Redis sorted sets: concrete leaderboard capacity numbers for 10k concurrent",
+   "detail": "ZADD/ZREVRANK/ZREVRANGE are O(log N); ZRANGEBYSCORE-style range queries O(log N + M). Reported figures: ~100M members in a sorted set \u2248 6GB RAM; a single Redis instance sustains ~100k ZADD ops/sec on modern hardware and 100k+ ops/sec on a 100M-member set; 'millions of ranked members in roughly 500 MB of RAM'. Recommended key naming encodes scope + timeframe: leaderboard:global:alltime, leaderboard:global:weekly:2026-W22, leaderboard:region:na:daily:2026-05-28. ZREVRANGE with an offset around the user's own rank gives the 'players around you' view.",
+   "implication": "Our worst case is trivially small for Redis: 10,000 students x a few hundred tests is <10M members, well under 1GB. Use one ZSET per test (leaderboard:test:{id}), one per weekly streak board, one per chapter. Use ZREVRANK for 'your rank' and ZREVRANGE around rank for the neighbour window \u2014 never compute ranks in Postgres. Persist final standings to Postgres after the test closes and let the ZSET expire.",
+   "confidence": "high",
+   "source": "https://redis.io/docs/latest/develop/use-cases/leaderboard/"
+  },
+  {
+   "title": "Safe Exam Browser is MPL-2.0 but has no Android build \u2014 hard blocker for our Android half",
+   "detail": "SEB is licensed under the Mozilla Public License. Available for Windows, macOS and iOS (iOS 9.3.5+); explicitly NOT available for Android or Chromebooks. On iOS, SEB uses Apple's Automatic Assessment Configuration (AAC), presented to the user as 'app self-lock', and the docs call AAC the recommended kiosk mode because it applies all restrictions (including keyboard and dictionary) automatically. SEB Server (github.com/SafeExamBrowser/seb-server) reached v2 with built-in Screen Proctoring, refined in 2.2; seb-screen-proctoring-server is MPL-2.0, Java/Spring, last updated July 2026. Moodle integrates via quizaccess_seb (GPLv3) since Moodle 3.9 with a 'Launch Safe Exam Browser' button.",
+   "implication": "IGNORE SEB as a dependency \u2014 no Android build, and it is a separate browser app, not something an RN app can embed. But ADOPT its iOS technique directly: call AutomaticAssessmentConfiguration / AEAssessmentSession from an Expo config plugin / native module for real OS-level lockdown during mock tests. MPL-2.0 is file-level copyleft so even if we did lift a file, only that file must stay open \u2014 much safer than AGPL.",
+   "confidence": "high",
+   "source": "https://safeexambrowser.org/ios/ios_usermanual_en.html"
+  },
+  {
+   "title": "Android has no consumer-grade equivalent to iOS assessment mode",
+   "detail": "Android Lock Task Mode (developer.android.com/work/dpc/dedicated-devices/lock-task-mode) genuinely prevents exit, but requires the app to be Device Owner or whitelisted by a DPC \u2014 a managed/enterprise provisioning step, not something a consumer installs from Play. Plain screen pinning looks similar but the user can exit at any time. Expo cannot implement real kiosk mode without native modules. Community options: github.com/Riuhou/react-native-kiosk-manager (npm v0.12.2, TypeScript, lock task + boot autostart), react-native-expo-kiosk (v1.1.0), github.com/temaivanoff/react-native-lock-task. For capture prevention: github.com/wn-na/react-native-capture-protection (blocks/detects screenshots, screen recording and app-switcher preview, Expo-compatible via config plugin but not Expo Go) and react-native-screenguard.",
+   "implication": "Design anti-cheat as a *risk score*, not a lock. Ship: (1) iOS AAC hard lock where available; (2) Android screen pinning as a soft nudge + react-native-capture-protection to kill screenshots and the app-switcher snapshot; (3) server-side signals \u2014 AppState background transitions with timestamps, response-time outliers, answer-change entropy, impossible-speed correct answers, duplicate device fingerprints, IP clustering. Server-authoritative timer must keep running while backgrounded, and every backgrounding must be logged to the attempt as an event.",
+   "confidence": "high",
+   "source": "https://developer.android.com/work/dpc/dedicated-devices/lock-task-mode"
+  },
+  {
+   "title": "Moodle Proctoring plugin (GPLv3) \u2014 the OSS webcam-proctoring reference, still shipping in Nov 2025",
+   "detail": "quizaccess_proctoring (github.com/eLearning-BS23/moodle-quizaccess_proctoring, maintained by Brain Station 23), GPLv3-or-later. Captures a webcam still every 30 seconds (configurable), stores PNGs, blocks quiz access if the camera is denied, and post-hoc face-matches captures against a reference photo via the BS Face Matching API. A release supporting Moodle 4.3-5.0 landed 2025-11-06. Related commercial-integration plugins exist (quizaccess_autoproctor, ProctorLink).",
+   "implication": "Its interval-capture + post-hoc review pattern is the right low-cost model, but GPLv3 blocks reuse and its face-matching is an external paid API. For us: on-device face presence detection (ML Kit / TFLite, Apache-2.0) with only *events* uploaded (face_absent, multiple_faces) rather than images \u2014 far cheaper on Supabase Storage, far better for DPDP Act 2023 compliance with minors. Full webcam proctoring on consumer phones for JEE/NEET practice is likely product-inappropriate; reserve it for paid proctored mocks only.",
+   "confidence": "medium",
+   "source": "https://moodle.org/plugins/quizaccess_proctoring"
+  },
+  {
+   "title": "Moodle App (Apache-2.0) is the best legally-safe mobile reference for offline attempt sync",
+   "detail": "github.com/moodlehq/moodleapp \u2014 Apache-2.0, Ionic + Angular, 11,552 commits, 983 stars / 2.5k forks, actively maintained. It implements offline quiz attempts with later synchronisation against a server-authoritative Moodle backend, which is precisely the hard problem for Indian users on flaky mobile data.",
+   "implication": "ADOPT-AS-REFERENCE. Apache-2.0 means we can read and even adapt its sync/conflict-resolution logic legally. Key pattern to copy: queue answer-save operations locally with monotonic sequence numbers and a client timestamp, replay on reconnect, and let the server reject anything past the authoritative deadline. This is the one large open-source codebase in this space we can legally borrow from.",
+   "confidence": "high",
+   "source": "https://github.com/moodlehq/moodleapp"
+  },
+  {
+   "title": "Named-but-not-found projects: 'Quizzes', 'Sparky', 'Answerly' have no identifiable OSS assessment repo",
+   "detail": "Unverified \u2014 repeated searches surfaced no open-source assessment platform matching these names; 'Sparky' resolves to SparkyLinux/Spark XMPP/Spark NLP, and 'Answerly' to no OSS repo. Adjacent 2025-2026 finds instead: jovVix (github.com/Improwised/jovVix, real-time live quiz with dynamic leaderboards), QST (github.com/bobb34/QST, GPLv2, v3.12.11 released 2026-06-20, STEM-oriented with MathJax/TeX/MathML/mhchem equation authoring), OpenQuiz (github.com/yerdaulet-damir/openquiz, Next.js + Supabase, flashcard/drill/exam/mistakes modes with an SRS strength score), cbthost/cbthost-exam-system (PHP CBT admin panel), Samkarya/online-exam-questions (JSON question DB with LaTeX, but a bespoke 'ExamOven Non-Commercial Open Source License' \u2014 non-commercial, unusable for us).",
+   "implication": "Deprioritise these. The only two worth 30 minutes: QST for its STEM equation-authoring UX (GPLv2, study only) and OpenQuiz because it is the same stack we are on (Next.js + Supabase) \u2014 check its Postgres schema for SRS state columns, but verify its licence before reading closely. Explicitly avoid any 'non-commercial' licensed question dataset.",
+   "confidence": "medium",
+   "source": "https://github.com/bobb34/QST"
+  }
+ ],
+ "recommendations": [
+  "Adopt a permissive-only dependency policy for shipped code: MIT / BSD / Apache-2.0 only, MPL-2.0 acceptable (file-level copyleft), and hard-ban AGPL and GPL in the app bundle and in the Supabase/GCP backend. Enforce with an automated licence scan in CI (e.g. license-checker for npm, pip-licenses for the Python batch jobs) that fails the build on GPL/AGPL. The AGPL set to block by name: Canvas LMS, Open edX, TAO, TCExam, Frappe LMS, Anki. The GPL set: Moodle and all its plugins, ILIAS, Rogo/ExamSys, DOMjudge, QST, quizaccess_proctoring, quizaccess_seb.",
+  "Adopt ts-fsrs (MIT, FSRS-6) now for spaced repetition, keyed on (student_id, sub_topic_id) rather than (student_id, question_id), deriving the 4-level grade from correctness + response time, and serving a fresh unseen question from the due sub-topic. Run fsrs-rs (BSD-3) or py-fsrs (MIT) nightly on GCP to re-optimise the 21-parameter vector per cohort. Expose a 'exam countdown mode' that raises desired_retention from 0.90 toward 0.95 as the JEE/NEET date approaches.",
+  "Ship the dual-track difficulty architecture: online Elo (with decaying K \u2014 high K under ~50 responses per item, low K after, per the 2025 dynamic-K literature) for immediate cold-start item difficulty and adaptive practice selection; plus a monthly offline 2PL/3PL calibration with girth (MIT) for items with >=200 responses, feeding a theta-based 'predicted JEE/NEET percentile' that maps theta -> raw marks -> historical cutoff percentile. Keep student contest rating (Elo-MMR / openskill.py, both MIT) as a third, separate system for mock-test leaderboards \u2014 do not conflate it with ability theta.",
+  "Model the attempt store on Moodle's question_attempt / question_attempt_step design (append-only step rows per interaction, each with state + fraction + submitted data) without copying any GPL code. This single decision buys server-authoritative timing, crash-resume, partial-answer persistence, review-mode replay and a tamper-evident audit trail, and it is what makes randomised per-student ordering and sectioned papers tractable. Implement 3 behaviours only: deferred feedback (mock), immediate feedback (practice), interactive-with-tries (learn) \u2014 plus optional CBM as a differentiator given JEE/NEET negative marking.",
+  "For import/export, build in this order and stop when demand stops: (1) our own JSON/CSV admin bulk format with explicit LaTeX and image-URL fields; (2) GIFT parser for teacher-authored bulk text; (3) Moodle XML in/out as the interoperability escape hatch; (4) QTI 3.0 adapter only if an institutional or publisher deal requires it, and then wrap the MIT amp-up-io qti3-item-player in a WebView rather than writing a renderer. Skip Aiken, SCORM, Blackboard/WebCT entirely.",
+  "Adopt the xAPI (IEEE 9274.1.1-2023) statement shape as the internal analytics event schema from day one \u2014 actor / verb / object / result / context, with verbs like attempted, answered, completed, mastered \u2014 even without running an LRS. It costs nothing now, makes admin analytics queryable in a standard vocabulary, and de-risks any future institutional integration. Ignore Caliper and SCORM.",
+  "Implement anti-cheat as an asymmetric two-tier system: on iOS call AutomaticAssessmentConfiguration / AEAssessmentSession via an Expo config plugin for genuine OS-level lockdown (this is exactly what Safe Exam Browser does on iOS); on Android accept that Lock Task Mode needs Device Owner and is unreachable on consumer BYOD, so use screen pinning as a nudge plus react-native-capture-protection to block screenshots, recording and the app-switcher snapshot. Back both with server-side behavioural signals (backgrounding events, response-time outliers, impossible-speed correctness, device-fingerprint duplication) recorded as attempt events and surfaced as a risk score to ADMIN.",
+  "Use Redis sorted sets as the only ranking surface \u2014 one ZSET per test, per weekly board, per chapter, keyed leaderboard:test:{id} and leaderboard:global:weekly:{iso-week} \u2014 with ZREVRANK for 'your rank' and ZREVRANGE around the user's rank for the neighbour window. At 10k students this is well under 1GB and far under the ~100k ops/sec single-instance ceiling. Materialise final standings into Postgres when a test closes and let the ZSET TTL out.",
+  "Read the Moodle App (Apache-2.0) offline-sync implementation before designing our own offline attempt handling \u2014 it is the only large, mature, legally-borrowable mobile assessment codebase in this space, and offline resilience on Indian mobile networks is a first-order requirement, not a nice-to-have."
+ ],
+ "pitfalls": [
+  "AGPL contamination is the number one legal risk and it is not obvious to engineers: reading Moodle/Canvas/TAO/TCExam source to 'understand the schema' is fine, but copying a table definition verbatim, a grading function, or an XML parser into our backend triggers the AGPL network clause and would require open-sourcing our entire server. Clean-room the design; never paste. Also watch transitive contamination: H5P's core is MIT but its PHP library embeds GPL purification code, and Open edX's own wiki documents ongoing AGPL-incompatible dependency problems.",
+  "Non-commercial and bespoke licences masquerading as open source: Samkarya/online-exam-questions ships under an 'ExamOven Non-Commercial Open Source License' \u2014 using that question data in a paid app is a licence violation. Any scraped or community JEE/NEET question dataset must be licence-audited before ingestion, and PYQ questions themselves carry copyright questions in India regardless of the repo licence.",
+  "Treating FSRS as a drop-in for MCQs will fail: an MCQ is consumed after one or two exposures because the student memorises the option, not the concept. If the card is the question, the algorithm optimises for re-showing questions whose answers are already known, and retention metrics will look great while learning does not transfer. The card must be the concept/sub-topic, with a fresh item drawn each time and a separate seen-ledger to prevent repeats.",
+  "Attempting real-time IRT (2PL/3PL) or a full CAT at launch will stall the product: 3PL needs a guessing parameter estimated from large samples, calibration needs roughly 200-500 responses per item before parameters stabilise, and CAT additionally needs item-exposure control or the pool leaks. With a cold-start bank there is nothing to calibrate. Elo first, IRT later, CAT possibly never \u2014 and never run IRT estimation inside a request-path Edge Function.",
+  "Assuming CTFd or DOMjudge prove our concurrency story: independent 2026 assessment puts stock CTFd at reliable performance below ~1,000 concurrent participants, an order of magnitude under our 10,000 target, and DOMjudge's scale comes from a decoupled judgehost queue, not from the web tier. Also beware the thundering herd unique to sectioned timed tests \u2014 10,000 students all submitting in the final 60 seconds and all polling a leaderboard at T+0 is a burst pattern that neither project's default config anticipates.",
+  "Android kiosk expectations will be set wrong by demos: Lock Task Mode requires Device Owner provisioning (factory-reset-level enterprise enrolment) and is simply unavailable for a consumer Play Store install; plain screen pinning is user-exitable at will. Expo Go cannot host any of these native modules. Promising 'exam-proof lockdown on Android' in marketing or to coaching partners will not survive contact with reality \u2014 and Safe Exam Browser has no Android build at all to fall back on.",
+  "Webcam proctoring on minors' devices is a compliance and trust hazard in India: the Moodle proctoring pattern uploads a PNG every 30 seconds, which for 10,000 students is enormous Storage cost and, under the DPDP Act 2023's stricter treatment of children's data, a significant liability. Prefer on-device inference emitting only events, and gate any image capture behind explicit, separately-consented paid proctored mocks.",
+  "TrueSkill is patent-encumbered by Microsoft \u2014 if a leaderboard implementation reaches for it (or for a TrueSkill port), that is a patent exposure, not a licence one, and a licence scanner will not catch it. Use openskill.py or Elo-MMR (both MIT) instead.",
+  "QTI 3.0 looks like the 'right' standard and is a classic scope trap: it is XML-heavy, carries maths as MathML 3 rather than LaTeX, has uneven LMS support even in 2026, and would force a lossy round-trip against our JSONB + LaTeX model. Building QTI support before a customer demands it burns weeks for zero user-visible value."
+ ],
+ "openQuestions": [
+  "What licence does yerdaulet-damir/openquiz carry? It is the closest stack match (Next.js + Supabase with an SRS strength score) and its Postgres schema for SRS state would be directly instructive, but the licence was not verified \u2014 confirm before reading it closely.",
+  "Does ts-fsrs's @open-spaced-repetition/binding optimiser run in a Supabase Edge Function (Deno) runtime, or does it require a Node >=20 environment with native bindings? If native-only, parameter optimisation must live in a GCP Cloud Run job rather than in Supabase.",
+  "Is there any peer-reviewed or industry evidence for FSRS applied to MCQ question banks rather than flashcards? Nothing was found; if none exists, the concept-level-card design should be validated with an internal A/B against a simpler leech/wrong-answer-requeue baseline before it is marketed as a differentiator.",
+  "What is the current licence and maintenance state of Rogo/ExamSys under its new name at examsys-oss.nottingham.ac.uk \u2014 is the GPLv3 repo still receiving commits in 2025-2026, and does it have the item-analysis reports (facility, discrimination index) worth reimplementing?",
+  "Does Apple's AutomaticAssessmentConfiguration require any entitlement, MDM supervision, or App Store review justification for a consumer education app, or can any app call AEAssessmentSession? SEB's docs imply 'approved developers' for some configurations \u2014 this needs confirming with Apple's current documentation before it is designed into the mock-test flow.",
+  "Are there 2025-2026 open-source Indian-market-specific question banks or PYQ datasets with a genuinely permissive licence, and what is the copyright position on reproducing NTA JEE/NEET past papers in a commercial app under Indian law?",
+  "For predicted-rank accuracy, which historical JEE Main/Advanced and NEET marks-to-percentile-to-rank mapping tables are usable, and are they redistributable? Theta estimation is the easy half; the score-scale conversion is the half that determines whether students trust the number.",
+  "Does Supabase Realtime plus Postgres handle the end-of-test burst (10,000 concurrent submissions plus leaderboard subscriptions within ~60 seconds), or does the submission path need to terminate in Redis with asynchronous drain into Postgres? This is the single architectural question that the open-source contest systems (DOMjudge's queue separation) suggest we should answer before launch.",
+  "Which specific FSRS-6 parameter set should be the cold-start default for a competitive-exam population, given that the published defaults are fitted on Anki flashcard reviews with a very different item mix and review cadence?"
+ ],
+ "sources": [
+  "https://docs.moodle.org/501/en/Question_behaviours",
+  "https://docs.moodle.org/502/en/GIFT_format",
+  "https://docs.moodle.org/405/en/Moodle_XML_format",
+  "https://moodledev.io/general/releases/5.0",
+  "https://github.com/moodlehq/moodleapp",
+  "https://moodle.org/plugins/quizaccess_proctoring",
+  "https://github.com/eLearning-BS23/moodle-quizaccess_proctoring",
+  "https://www.taotesting.com/products/tao-core/",
+  "https://github.com/oat-sa/package-tao",
+  "https://github.com/tecnickcom/tcexam",
+  "https://github.com/instructure/canvas-lms",
+  "https://docs.openedx.org/en/latest/community/release_notes/verawood.html",
+  "https://openedx.atlassian.net/wiki/spaces/AC/pages/3848830988/Open+edX+Dependency+Licensing+Problems",
+  "https://github.com/frappe/lms",
+  "https://github.com/OpenOLAT/OpenOLAT",
+  "https://en.wikipedia.org/wiki/ILIAS",
+  "http://rogo-oss.nottingham.ac.uk/",
+  "https://www.imsglobal.org/spec/qti/v3p0/oview",
+  "https://www.imsglobal.org/spec/qti/v3p0/impl",
+  "https://github.com/amp-up-io/qti3-item-player",
+  "https://github.com/amp-up-io/qti3-item-player-vue3",
+  "https://github.com/agencyenterprise/qti-3-player",
+  "https://h5p.org/licensing",
+  "https://h5p.org/MIT-licensed",
+  "https://github.com/tunapanda/h5p-standalone",
+  "https://standards.ieee.org/ieee/9274.1.1/7321/",
+  "https://www.imsglobal.org/initial-xapicaliper-comparison",
+  "https://www.imsglobal.org/spec/lti/v1p3/cert",
+  "https://github.com/dmitry-viskov/pylti1.3",
+  "https://github.com/open-spaced-repetition/ts-fsrs",
+  "https://github.com/open-spaced-repetition/py-fsrs",
+  "https://github.com/open-spaced-repetition/fsrs-rs",
+  "https://github.com/open-spaced-repetition/srs-benchmark",
+  "https://github.com/open-spaced-repetition/awesome-fsrs",
+  "https://github.com/open-spaced-repetition/FSRS-Kotlin",
+  "https://github.com/ankitects/anki/blob/main/LICENSE",
+  "https://github.com/ankitects/fsrs-benchmark",
+  "https://github.com/nd-ball/py-irt",
+  "https://arxiv.org/abs/2203.01282",
+  "https://github.com/eribean/girth",
+  "https://github.com/douglasrizzo/catsim",
+  "https://assess.com/computerized-adaptive-testing/",
+  "https://www.sciencedirect.com/science/article/abs/pii/S036013151630080X",
+  "https://www.sciencedirect.com/science/article/pii/S2666920X25000165",
+  "https://bpspsychub.onlinelibrary.wiley.com/doi/10.1111/bmsp.12395",
+  "https://link.springer.com/article/10.1007/s11257-025-09439-z",
+  "https://github.com/EbTech/Elo-MMR",
+  "https://github.com/vivekjoshy/openskill.py",
+  "https://arxiv.org/abs/2401.05451",
+  "https://github.com/atomflunder/skillratings",
+  "https://github.com/CTFd/CTFd",
+  "https://github.com/DOMjudge/domjudge",
+  "https://www.domjudge.org/docs/manual/8.2/overview.html",
+  "https://www.simulationslabs.com/blogs/CTFd_FBCTF_and_rCTF_Which_OpenSource_CTF_Platform_Should_You_Deploy_in_2026",
+  "https://redis.io/docs/latest/develop/use-cases/leaderboard/",
+  "https://safeexambrowser.org/ios/ios_usermanual_en.html",
+  "https://github.com/SafeExamBrowser/seb-server",
+  "https://github.com/SafeExamBrowser/seb-screen-proctoring-server",
+  "https://docs.moodle.org/502/en/Safe_Exam_Browser",
+  "https://developer.apple.com/documentation/automaticassessmentconfiguration",
+  "https://developer.android.com/work/dpc/dedicated-devices/lock-task-mode",
+  "https://github.com/Riuhou/react-native-kiosk-manager",
+  "https://github.com/wn-na/react-native-capture-protection",
+  "https://github.com/temaivanoff/react-native-lock-task",
+  "https://github.com/bobb34/QST",
+  "https://github.com/yerdaulet-damir/openquiz",
+  "https://github.com/Improwised/jovVix",
+  "https://github.com/Samkarya/online-exam-questions"
+ ]
+}

@@ -1,0 +1,7 @@
+packages:
+  - 'packages/*'
+  - 'apps/*'
+allowBuilds:
+  # esbuild ships a platform-specific binary via its install script; vitest
+  # cannot transform TypeScript without it.
+  esbuild: true

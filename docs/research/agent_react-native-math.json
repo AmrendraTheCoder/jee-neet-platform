@@ -1,0 +1,319 @@
+{
+ "summary": "Verified against the npm registry and GitHub APIs on 2026-07-25. The React Native client baseline for this app is RN 0.86 / Expo SDK 57 (released 2026-06-30), New-Architecture-only \u2014 the legacy Paper renderer was deleted in RN 0.82, so every library choice must be Fabric-native. Expo SDK 57 pins react-native-webview 13.16.1, @shopify/flash-list 2.0.2, react-native-svg 15.15.4, react-native-reanimated 4.5.0, @shopify/react-native-skia 2.6.2, expo-sqlite ~57.0.1. For math, every \"native\" RN math library is dead: react-native-math-view is ARCHIVED (94 stars, last push 2024-09-05, v3.9.5 from 2021), react-native-mathjax-html-to-svg last published 2023, react-native-katex is a 52-star hobby wrapper. The realistic 2026 architecture is: author in LaTeX, pre-render server-side with KaTeX 0.18.1 (measured 0.103 ms/expression, 4.5 KB HTML / 829 B gzip for a typical JEE integral; 652 B for MathML-only), store LaTeX source as the canonical column plus a cached render, and display with exactly ONE WebView per screen that renders the whole question \u2014 never one WebView per FlatList row, since WebViews cost 150\u2013200 MB each and are throttled to ~3 concurrent instances in production micro-frontend systems. MathML is now \"widely available\" in both WKWebView and Android WebView (Chrome 109+, iOS Safari 5+), which makes shipping KaTeX's MathML-only output (205\u2013484 B gzipped) a genuinely viable ultra-light path, though Chromium's MathML Core is still incomplete for complex layouts. Chemistry is solved by KaTeX's mhchem contrib (33.7 KB / 8.4 KB gzip) for \\ce{} equations and reaction arrows; skeletal structure drawing needs smiles-drawer (197 KB min / 59 KB gzip) because RDKit.js ships a 6.6 MB WASM binary and entered \"maintenance transition\" on 2026-04-07. On the admin side TipTap 3.29.0 with the now-MIT @tiptap/extension-mathematics plus MathLive 0.110.0 as the virtual math keyboard is the strongest pairing \u2014 but note extension-mathematics still peer-deps katex ^0.16 || ^0.17, not the 0.18 line. Offline-first: PowerSync @powersync/react-native hit 2.0.0 on 2026-07-21 and is the documented, server-authoritative Supabase pairing (free tier 2 GB synced/month, 50 concurrent connections \u2014 far too small for 10k concurrent students; Pro is $49/mo for 1,000 connections + $30 per additional 1,000). WatermelonDB is effectively stalled (last push 2025-08-11). Motion should be Reanimated 4.5.x CSS animations with Material 3 tokens (150\u2013400 ms, emphasized-decelerate cubic-bezier(0.05,0.7,0.1,1)), Skia canvases forced to SurfaceView via opaque, and a hard cap of ~100 simultaneously animated components on low-end Android.",
+ "findings": [
+  {
+   "title": "react-native-math-view is archived and dead \u2014 do not use",
+   "detail": "GitHub repo ShaMan123/react-native-math-view is ARCHIVED (verified via GitHub API 2026-07-25): 94 stars, last push 2024-09-05, 10 open issues. npm latest is 3.9.5 published 2021-08-28 \u2014 nearly 5 years stale. It predates Fabric/New Architecture entirely and cannot work on RN 0.82+ where the legacy bridge was removed.",
+   "implication": "Rule it out at architecture time. Any tutorial or LLM suggestion recommending it is >2 years out of date. Same for react-native-mathjax-html-to-svg (1.1.0, 2023-06-30), react-native-mathjax-text-svg (1.0.14, 2023-11-30), react-native-mathjax-svg (0.9.9, 2021), react-native-latex (0.5.0, 2020).",
+   "confidence": "high",
+   "source": "https://github.com/ShaMan123/react-native-math-view"
+  },
+  {
+   "title": "There is no native (non-WebView) LaTeX renderer for React Native in 2026; it is an open feature request",
+   "detail": "software-mansion/react-native-enriched-markdown issue #109 (opened 2026-02-25) and react-native-enriched issue #439 both request native math via SwiftMath (iOS) and AndroidMath (Kotlin port of iosMath). Both are open, unassigned enhancements. The issue text itself states developers must 'rely on complex workarounds like embedding WebViews with MathJax/KaTeX or using SVG-based libraries'.",
+   "implication": "Plan for a WebView-based or pre-rendered-image renderer. Do not budget engineering time waiting for a native RN math view to land; treat SwiftMath/AndroidMath bridging as a >4-week custom native-module project if you ever want it.",
+   "confidence": "high",
+   "source": "https://github.com/software-mansion-labs/react-native-enriched-markdown/issues/109"
+  },
+  {
+   "title": "KaTeX 0.18.1 (2026-07-19) is current; 0.18.0 introduced a BREAKING CSS class-prefix change",
+   "detail": "npm registry: katex latest = 0.18.1 published 2026-07-19T08:40:11Z. 0.17.0 (2026-05-22) changed the internal __defineFunction API (no more props wrapper). 0.18.0 (2026-07-17) added CSS class prefixing for KaTeX elements \u2014 'users who apply custom styles or have allowlists targeting KaTeX's internal classes must update their selectors.' GitHub: KaTeX/KaTeX 20,258 stars, last push 2026-07-23, MIT.",
+   "implication": "Pin katex exactly and version the CSS you ship into the WebView alongside it. If you write custom .katex-* CSS overrides for dark mode / font sizing, 0.18 will silently break them. Also blocks a straight upgrade because tooling still peer-deps 0.16/0.17.",
+   "confidence": "high",
+   "source": "https://github.com/KaTeX/KaTeX/blob/main/CHANGELOG.md"
+  },
+  {
+   "title": "Measured: KaTeX server-side render is 0.103 ms/expression; output is 0.8\u20131.7 KB gzipped",
+   "detail": "Benchmarked locally with katex@0.18.1 on Node 22.21.0 (1000 iterations). Per-expression renderToString = 0.103 ms. Output sizes (HTML+MathML, displayMode, raw / gzip): x^2+y^2=z^2 \u2192 2,313 B / 481 B; JEE definite integral \\int_0^{\\pi/2}\\frac{\\sin^3 x}{\\sin^3 x+\\cos^3 x}dx \u2192 4,510 B / 829 B; 3x3 determinant \u2192 5,635 B / 921 B; Maxwell/Lorentz-force physics line \u2192 14,096 B / 1,658 B; \\ce{2H2 + O2 -> 2H2O} \u2192 6,212 B / 1,166 B; \\ce{CH3COOH + H2O <=> CH3COO^- + H3O^+} \u2192 9,935 B / 1,298 B.",
+   "implication": "Pre-rendering the entire question bank server-side is cheap: 100,000 expressions \u2248 10 seconds of CPU. A 90-question JEE Main paper with ~3 expressions each \u2248 270 renders \u2248 28 ms server-side, ~250 KB gzipped over the wire. Do it in a Supabase Edge Function on question INSERT/UPDATE and cache the HTML in a column.",
+   "confidence": "high",
+   "source": "https://katex.org/docs/api"
+  },
+  {
+   "title": "KaTeX MathML-only output is 3\u20138x smaller than HTML+MathML and MathML is now widely available in both WebViews",
+   "detail": "Measured with output:'mathml': simple 319 B (205 B gz), JEE integral 652 B (325 B gz), determinant 1,172 B (372 B gz), physics 1,134 B (484 B gz), \\ce{} equilibrium 1,636 B (415 B gz). caniwebview.com (data updated 2026-07-18, W3C WebView CG) marks MathML 'Widely available': WKWebView supported, Android WebView supported, Chrome for Android 109+, iOS Safari 5+.",
+   "implication": "MathML-only is the lightest possible payload and needs zero KaTeX CSS/fonts in the client. BUT Chromium ships only MathML Core (limited) vs Firefox's full support, so complex JEE Advanced layouts (matrices, multi-line aligned, stretchy \\ce arrows) may render inconsistently on Android. Recommended use: MathML as a fallback/accessibility layer and for search indexing, HTML+CSS KaTeX as the primary visual path.",
+   "confidence": "medium",
+   "source": "https://caniwebview.com/features/web-feature-mathml/"
+  },
+  {
+   "title": "MathJax 4.1.3 SVG output is ~2.5x larger and ~11x slower than KaTeX HTML",
+   "detail": "Benchmarked mathjax-full tex2svg with fontCache:'local' (200 iterations): 1.14 ms per expression vs KaTeX's 0.103 ms. SVG output sizes (raw / gzip): simple 4,408 B / 1,910 B; JEE integral 10,677 B / 3,936 B; determinant 8,323 B / 3,131 B; physics line 18,300 B / 6,432 B; \\ce{2H2+O2->2H2O} 5,543 B / 1,586 B. npm mathjax latest = 4.1.3 (2026-07-03); MathJax 4.0.0 shipped 2025-08-04 and added a dedicated mhchem font so stretchy reaction arrows finally render correctly in both CHTML and SVG.",
+   "implication": "Use MathJax only where you specifically need SVG (e.g. rendering a question into a PNG/PDF for sharing, or into react-native-svg without any WebView). For the in-app reader, KaTeX wins on every axis. MathJax's mhchem font fix is the one reason to prefer it for very complex chemistry arrows.",
+   "confidence": "high",
+   "source": "https://docs.mathjax.org/en/v4.0/upgrading/whats-new-4.0.html"
+  },
+  {
+   "title": "The FlatList-of-50-WebViews problem: each WebView costs 150\u2013200 MB; production systems cap at ~3 live instances",
+   "detail": "Documented production data: 'crash reporting often reveals WebViews consuming 150-200MB each', mitigated by a WebViewManager enforcing a default limit of 3 concurrent WebViews with LRU eviction, yielding 35\u201345% memory reduction per WebView and >90% reduction in crash/white-screen incidents. Instantiating a WebView is described as 'an exceptionally heavy operation'. Separately, react-native-webview issue #3168 documents an Android memory leak where changing onMessage adds a BatchedBridge callback that is never released.",
+   "implication": "Never render one WebView per question row. On a 4 GB Android device (the 2026 India entry-level baseline), 5 live WebViews will OOM. The architecture must be: one WebView per visible screen, or zero WebViews with pre-rendered images.",
+   "confidence": "medium",
+   "source": "https://sph.sh/en/posts/mobile-micro-frontends-react-native-expo-webviews/"
+  },
+  {
+   "title": "Expo DOM Components ('use dom') are a WebView, and they do NOT support OTA updates",
+   "detail": "Expo SDK 57 bundles @expo/dom-webview ~57.0.1. Docs: the 'use dom' directive renders the component in an embedded WebView communicating over an async JSON bridge; only serializable props cross; function props must be async; children cannot be passed; native views cannot be embedded inside; 'DOM components only support standard JavaScript, which is slower to parse and start up than optimized Hermes bytecode'; explicitly 'currently don't support over-the-air updates'. Expo recommends them for 'rich-text rendering, markdown, or auxiliary routes \u2014 not as a replacement for native views'.",
+   "implication": "DOM components are the ergonomically nicest way to embed a KaTeX renderer (you write real React DOM + katex), and the docs literally name rich-text rendering as the use case. But if question-bank hotfixes must ship via EAS Update, the no-OTA limitation is disqualifying for the core reader. Verify against SDK 57 release notes before committing; if confirmed, use a plain react-native-webview with an HTML template you can OTA.",
+   "confidence": "medium",
+   "source": "https://docs.expo.dev/guides/dom-components/"
+  },
+  {
+   "title": "A fully offline, self-contained KaTeX WebView asset bundle is 556 KB raw / 643 KB with base64-inlined fonts",
+   "detail": "Measured from the katex@0.18.1 tarball: katex.min.js 271,715 B (76,191 B gzip), katex.min.css 24,727 B (3,605 B gzip), 20 .woff2 fonts totalling 259,792 B (largest: AMS-Regular 28,076 B, Main-Regular 26,272 B, Math-Italic 16,440 B). Full dist/fonts dir (ttf+woff+woff2) is 1.1 MB \u2014 ship woff2 only. mhchem.min.js adds 33,706 B (8,425 B gzip).",
+   "implication": "Bundling KaTeX + mhchem as a local asset for a single offline WebView costs ~590 KB of app size (or ~643 KB as one inlined HTML file). That is acceptable and means zero network dependency for math rendering \u2014 critical for patchy Indian networks and for offline mock tests. Load via source={{ html, baseUrl }} or an Android asset:// / iOS bundle path; never a CDN.",
+   "confidence": "high",
+   "source": "https://www.npmjs.com/package/katex"
+  },
+  {
+   "title": "mhchem is the correct chemistry-equation solution: 33.7 KB, first-class in both KaTeX and MathJax",
+   "detail": "KaTeX ships contrib/mhchem/mhchem.min.js (33,706 B; 8,425 B gzip) adding \\ce{} and \\pu{}. Reaction arrows are native KaTeX extensible arrows since PR #1078, which added \\xrightleftarrows, \\xrightequilibrium, \\xleftequilibrium \u2014 user syntax \\ce{A<-->B}, \\ce{A<=>>B}, \\ce{A<<=>B}. Load order matters: katex.min.js, then mhchem.min.js, then auto-render. \\cf is removed; only \\ce is supported. Verified rendering \\ce{[Cu(NH3)4]^{2+} + 4H+ ->[\\Delta] Cu^{2+} + 4NH4+} \u2192 10,244 B / 1,384 B gz.",
+   "implication": "All NEET/JEE inorganic and physical chemistry equations, equilibria, oxidation states, subscripts/superscripts and reaction conditions above/below arrows are covered by mhchem with zero extra infrastructure. Give admins a \\ce{} snippet button in the editor. No separate chemistry renderer is needed for equations.",
+   "confidence": "high",
+   "source": "https://github.com/KaTeX/KaTeX/blob/main/contrib/mhchem/README.md"
+  },
+  {
+   "title": "RDKit.js is 6.6 MB of WASM and lost its maintainer in April 2026 \u2014 do not ship it in the app",
+   "detail": "Measured from @rdkit/rdkit@2025.3.4-1.0.0 (published 2025-07-07): RDKit_minimal.wasm = 6,914,823 B (2,058,729 B gzip), RDKit_minimal.js = 128,073 B (30,320 B gzip). README states 'IN MAINTENANCE TRANSITION (April 7th 2026)' \u2014 @michelml no longer maintains the repo or npm releases; @greglandrum is seeking a new maintainer. GitHub rdkit/rdkit-js: 241 stars, BSD-3-Clause, 39 open issues.",
+   "implication": "Never bundle RDKit into the mobile client. If you need SMILES \u2192 skeletal structure images (organic chemistry mechanisms, IUPAC naming questions), run RDKit server-side (Python RDKit in a GCP Cloud Run job) and store the resulting SVG/PNG in Supabase Storage, served via expo-image. Alternative pure-JS client option: smiles-drawer 2.4.1 (2026-06-26), 197,128 B min / 59,366 B gzip \u2014 35x smaller than RDKit and viable inside the same WebView.",
+   "confidence": "high",
+   "source": "https://github.com/rdkit/rdkit-js"
+  },
+  {
+   "title": "Ketcher is the admin-side structure editor, but it is heavy and web-only",
+   "detail": "ketcher-react 3.17.1 published 2026-07-16; GitHub epam/ketcher 847 stars, last push 2026-07-24, Apache-2.0, but 1,059 open issues. It is a full 2D chemical structure editor for the browser (React), not React Native.",
+   "implication": "Use Ketcher in the ADMIN web console only (authors draw a structure \u2192 export MOL/SMILES \u2192 server renders to SVG). Do not attempt to embed it in the RN app. Its very large open-issue count argues for treating it as an optional authoring nicety, not a load-bearing dependency.",
+   "confidence": "medium",
+   "source": "https://github.com/epam/ketcher"
+  },
+  {
+   "title": "MathLive 0.110.0 is the right virtual math keyboard for admin authoring \u2014 843 KB min (227 KB gzip) + 296 KB fonts",
+   "detail": "npm mathlive latest = 0.110.0 published 2026-06-09. GitHub arnog/mathlive: 2,113 stars, last push 2026-07-24, MIT, 145 open issues. Measured package: mathlive.min.mjs 842,878 B (227,080 B gzip), mathlive-ssr.min.mjs 396,585 B (111,464 B gzip), mathlive-static.css 13,154 B, 20 fonts 296 KB, sounds 240 KB. 800+ LaTeX commands, mobile-ready virtual keyboards, export to LaTeX, MathML, ASCIIMath, Typst, or MathJSON. Companion @cortex-js/compute-engine 0.93.0 (2026-07-23) does symbolic evaluation.",
+   "implication": "MathLive is a web component \u2014 it belongs in the admin web console (or an admin-only WebView inside the app). Its LaTeX output feeds directly into the KaTeX pipeline. Its MathJSON export is the ready-made portable AST if you later want structured search/equivalence checking. Do not ship MathLive to students; 227 KB gzip is pure authoring weight.",
+   "confidence": "high",
+   "source": "https://mathlive.io/"
+  },
+  {
+   "title": "TipTap 3.29.0's Mathematics extension is now MIT, but it peer-deps katex ^0.16||^0.17 \u2014 not 0.18",
+   "detail": "npm @tiptap/extension-mathematics@3.29.0 (published 2026-07-24) \u2014 license MIT, peerDependencies { katex: '^0.16.4 || ^0.17.0', '@tiptap/core': '3.29.0', '@tiptap/pm': '3.29.0' }. Tiptap open-sourced 10 formerly Pro extensions under MIT (Mathematics among them). GitHub ueberdosis/tiptap: 37,767 stars, last push 2026-07-24, 827 open issues. Compare: lexical 0.48.0 (2026-07-16, facebook/lexical 23,704 stars) has no first-party math extension; slate 0.126.0 (2026-07-09); quill 2.0.3 (2024-11-30, stale).",
+   "implication": "TipTap 3.29 + @tiptap/extension-mathematics + MathLive as the input surface is the recommended admin stack. But you must run katex 0.17.x in the admin editor while the reader may want 0.18.x \u2014 either pin both to 0.17.x for now, or accept a version split and keep the SSR renderer and editor on separate katex installs. Quill is effectively frozen; Lexical would require writing your own math node.",
+   "confidence": "high",
+   "source": "https://www.npmjs.com/package/@tiptap/extension-mathematics"
+  },
+  {
+   "title": "Expo SDK 57 (2026-06-30) pins specific library versions that differ from npm 'latest' \u2014 this is the real compatibility matrix",
+   "detail": "From expo/expo sdk-57 bundledNativeModules.json (123 entries): react-native 0.86.0, react-native-webview 13.16.1 (npm latest is 14.0.1, with 15.0.0 and 16.0.0 already published), @shopify/flash-list 2.0.2 (npm latest 2.3.2), react-native-svg 15.15.4 (latest 15.15.5), react-native-reanimated 4.5.0, react-native-worklets 0.10.0, react-native-gesture-handler ~2.32.0, @shopify/react-native-skia 2.6.2 (latest 2.10.0), expo-sqlite ~57.0.1, expo-image ~57.0.1, expo-router ~57.0.8, expo-updates ~57.0.10, @react-native-async-storage/async-storage 2.2.0. SDK 57 = React 19.2. expo prebuild now clears and regenerates native dirs by default.",
+   "implication": "Use `npx expo install` and accept these pins; do not chase npm latest. Notably react-native-webview is 2 majors behind on Expo \u2014 check for the fixes you need before assuming 13.16.1 has them. FlashList 2.0.2 vs 2.3.2 is 8 months of bugfixes you would be forfeiting; consider an explicit override after testing.",
+   "confidence": "high",
+   "source": "https://expo.dev/changelog/sdk-57"
+  },
+  {
+   "title": "The legacy architecture is gone: RN 0.82 removed the bridge, so all libraries must be Fabric-native",
+   "detail": "Timeline: New Architecture stable in 0.76 (Oct 2024); legacy architecture frozen June 2025; 0.81/Expo SDK 54 were the last with a legacy interop path; 0.82 is the first version running entirely on the New Architecture; legacy removed from the codebase by 0.83/Expo SDK 55. RN 0.86 (2026-06-11) ships with no user-facing breaking changes vs 0.85; deprecates ViewUtil.getUIManagerType. FlashList v2.x is New-Architecture-only and 'will not run on old architecture'. Reanimated 4.x is New-Architecture-only; Reanimated 3.19.5 (2025-12-22) is the last 3.x and is no longer actively maintained.",
+   "implication": "Any library whose last release predates ~mid-2025 is a compatibility risk by default. This is the single cheapest filter for evaluating the many stale math/chemistry RN packages.",
+   "confidence": "high",
+   "source": "https://reactnative.dev/blog/2026/06/11/react-native-0.86"
+  },
+  {
+   "title": "FlashList v2.3.2 is the list to use \u2014 JS-only, no size estimates, but has documented gotchas",
+   "detail": "npm @shopify/flash-list latest 2.3.2 (2026-06-10). GitHub Shopify/flash-list: 7,149 stars, last push 2026-07-24, MIT, 137 open issues. v2 removed estimatedItemSize/estimatedListSize/estimatedFirstItemOffset; MasonryFlashList replaced by a `masonry` prop; added useLayoutState, useRecyclingState, useMappingHelper, useFlashListContext, maxItemsInRecyclePool, onStartReached, maintainVisibleContentPosition. Shopify claims up to 50% less blank area vs v1. Known issues: maintainVisibleContentPosition is ON by default and causes items to move on data re-order (fix: maintainVisibleContentPosition={{disabled:true}}); horizontal lists ignore contentContainerStyle padding; issue #1966 \u2014 infinite render loop ('Exceeded max renders without commit') on specific Android devices (Oppo, Samsung) when nested in a ScrollView; issue #2050 \u2014 maintainVisibleContentPosition bug when initial data doesn't fill the screen; dynamic-height items (late-loading images) leave blank space unless useLayoutState is used.",
+   "implication": "For the question-palette / practice-feed screens use FlashList v2 with getItemType keyed on question type (text-only vs has-math vs has-image) so recycling pools stay homogeneous. Explicitly disable maintainVisibleContentPosition on the question list. Never nest it in a ScrollView. Use useLayoutState in any row whose height changes after mount.",
+   "confidence": "high",
+   "source": "https://shopify.github.io/flash-list/docs/known-issues/"
+  },
+  {
+   "title": "Reanimated 4.5.3 with CSS animations is the animation baseline; Moti is abandoned and Reanimated-3-only",
+   "detail": "npm react-native-reanimated latest 4.5.3 (2026-07-22); dist-tag legacy 4.3.3; nightly 4.6.0. GitHub software-mansion/react-native-reanimated: 10,928 stars, last push 2026-07-24. Reanimated 4.0 stable shipped mid-2025 with the CSS Animations API (keyframes on Animated.View style props) and CSS Transitions API. Compatibility table: 4.6.x supports RN 0.83\u20130.86 and requires react-native-worklets 0.12.x; Expo SDK 57 pins reanimated 4.5.0 + worklets 0.10.0. Moti latest is 0.30.0 published 2025-01-29, GitHub nandorojo/moti last push 2025-03-11 \u2014 README still says 'powered by Reanimated 3'; issue #391 requests Reanimated 4 support and is open.",
+   "implication": "Do not adopt Moti. Use Reanimated 4's CSS Animations/Transitions API directly \u2014 it is more declarative than Moti was, is officially maintained, and is what Expo pins. Restrained motion is easier to express with CSS transitions (transition-property/duration/timing-function) than with imperative springs.",
+   "confidence": "high",
+   "source": "https://docs.swmansion.com/react-native-reanimated/docs/guides/compatibility/"
+  },
+  {
+   "title": "Hard performance ceiling: animate \u2264100 components on low-end Android, \u2264500 on iOS",
+   "detail": "Official Reanimated performance guide: 'animate no more than 100 components simultaneously on low-end Android devices and no more than 500 on iOS'. Prefer transform/opacity/backgroundColor over top/left/width/height (the latter force per-frame layout recalculation). Never read shared values from the JS thread \u2014 it blocks JS until sync completes. The docs acknowledge New Architecture animation performance regressions vs Legacy, mitigated by feature flags DISABLE_COMMIT_PAUSING_MECHANISM and USE_COMMIT_HOOK_ONLY_FOR_REACT_COMMITS, RN 0.80+ with Reanimated 4.2.0+, and debugOptimized build variants on Android (RN 0.82+). For complex scenes, use Skia rather than many animated RN components.",
+   "implication": "Concrete budget for the design bar: a leaderboard or question-palette grid must not animate every cell. Animate the container, stagger at most ~20 children, and use a single Skia canvas for anything richer (streak rings, coin bursts, progress arcs).",
+   "confidence": "high",
+   "source": "https://docs.swmansion.com/react-native-reanimated/docs/guides/performance/"
+  },
+  {
+   "title": "Skia on low-end Android: the single biggest fix is forcing SurfaceView via the `opaque` prop",
+   "detail": "Margelo's Pingo case study on a sub-$100 120 Hz Android device: TextureView compositing meant 'the GPU touches the canvas pixels two or three times every frame' (Skia render \u2192 HWUI sample \u2192 SurfaceFlinger composite), producing 79% of frames flagged for slow bitmap uploads and 85% janky frames at 120 Hz. Switching the Canvas from TextureView to SurfaceView via the `opaque` prop delivered the overwhelming majority of the improvement (hardware overlay compositing, no per-frame texture upload); RenderThread CPU fell 50\u201365%. Second cause: usePathValue/usePathInterpolation worklets that re-dirty their own outputs, continuously re-recording an idle canvas \u2014 disabling idle canvases cut frame time from 17\u201332 ms to ~9 ms. Third: store patterns minting fresh objects per poll, invalidating useMemo and forcing Skia re-recordings. npm @shopify/react-native-skia latest 2.10.0 (2026-07-23); GitHub 8,468 stars, last push 2026-07-23.",
+   "implication": "Three mandatory rules for this app: (1) set opaque on every Skia Canvas; (2) unmount or freeze Skia canvases that are off-screen or idle (e.g. the streak ring on a scrolled-away card); (3) never create new object identities per render in the store that feeds Skia. These are the difference between 60 fps and 15 fps on a Redmi/Realme.",
+   "confidence": "high",
+   "source": "https://blog.margelo.com/profiling-skia-reanimated-low-end-android"
+  },
+  {
+   "title": "Material 3 motion tokens give exact, restrained values to standardise on",
+   "detail": "From material-components-android docs/theming/Motion.md \u2014 Easing: Standard cubic-bezier(0.2,0,0,1); Standard Decelerate (0,0,0,1); Standard Accelerate (0.3,0,1,1); Emphasized Decelerate (0.05,0.7,0.1,1); Emphasized Accelerate (0.3,0,0.8,0.15); Linear (0,0,1,1); Emphasized is a two-segment path, not a single cubic-bezier. Durations: Short1 50 ms, Short2 100, Short3 150, Short4 200, Medium1 250, Medium2 300, Medium3 350, Medium4 400, Long1 450, Long2 500, Long3 550, Long4 600, ExtraLong1\u20134 700/800/900/1000 ms.",
+   "implication": "Publish a motion token file mirroring these: use Short3/Short4 (150\u2013200 ms) for state changes (option select, toggle), Medium2/Medium3 (300\u2013350 ms) for screen and sheet transitions, Emphasized Decelerate for entering elements, Emphasized Accelerate for exiting, Standard for in-place property changes. Never use spring bounce >1.0 overshoot; no durations over 400 ms in the test-taking flow where students are time-pressured. Cap the entire motion vocabulary at ~5 tokens to keep it professional.",
+   "confidence": "high",
+   "source": "https://github.com/material-components/material-components-android/blob/master/docs/theming/Motion.md"
+  },
+  {
+   "title": "PowerSync + Supabase is the documented, server-authoritative offline pairing; @powersync/react-native hit 2.0.0 on 2026-07-21",
+   "detail": "npm @powersync/react-native latest 2.0.0 (2026-07-21; previous 1.35.9 on 2026-07-10 \u2014 a major bump 11 days before this research). @powersync/op-sqlite 0.9.15 (2026-07-10), @powersync/attachments 3.0.0, @journeyapps/react-native-quick-sqlite 2.5.2. GitHub powersync-ja/powersync-js: 693 stars, last push 2026-07-24, Apache-2.0, 42 open issues. Supabase lists PowerSync as an official partner. Setup \u224810\u201315 min: create a PowerSync Postgres user with replication privileges, a Postgres publication, connect the instance, enable Supabase auth. Sync Streams (SQL-like YAML) control which rows reach which device. Documented caveat: Supabase WAL growth on idle instances requires config adjustment on hobby projects.",
+   "implication": "This is the lowest-risk offline path for a Supabase backend and the one to default to. Sync Streams map cleanly onto the content hierarchy \u2014 sync only the chapters/topics a student has downloaded, plus their own attempts, never the whole question bank.",
+   "confidence": "high",
+   "source": "https://docs.powersync.com/integrations/supabase/guide"
+  },
+  {
+   "title": "PowerSync conflict resolution is server-authoritative \u2014 the client never merges, which fits offline test submission exactly",
+   "detail": "Writes go to local SQLite, are placed on an upload queue, and are uploaded by a developer-defined uploadData() function. 'Because of the server-authoritative nature of PowerSync, whatever is written to the backend database will automatically be reflected on all clients (without overwriting local changes that have not yet been uploaded). The client never has to resolve conflicts locally. Only once all the local changes have been acknowledged by the server, and the data for that new checkpoint is downloaded by the client, does the client advance to the next checkpoint.' Custom write checkpoints (async writes via a message queue, transaction.complete(writeCheckpointId)) are Team/Enterprise-tier only.",
+   "implication": "For offline answers: write the answer row locally with a client-generated UUID and a monotonic client_seq + client_timestamp; on upload, a Supabase Edge Function / Postgres function applies exam-integrity rules (reject if the attempt window has closed, take first-write-wins per (attempt_id, question_id), recompute score server-side). Since the server is authoritative, the corrected state replicates back automatically. Do NOT trust client timestamps for the exam timer \u2014 that stays server-authoritative and separate from sync.",
+   "confidence": "high",
+   "source": "https://powersync.com/blog/turnkey-backend-functionality-conflict-resolution-for-powersync"
+  },
+  {
+   "title": "PowerSync pricing breaks at your 10,000-concurrent-student scale-target",
+   "detail": "Free: 2 GB synced/month, 500 MB hosted, 50 peak concurrent connections, projects deactivate after 1 week idle. Pro $49+/mo: 30 GB synced included ($1/GB over), 10 GB hosted ($1/GB over), 1,000 concurrent connections included, $30 per additional 1,000 connections. Team $599+/mo: same data/connection rates, SLA, uptime guarantee, RBAC, AWS private endpoints. Enterprise: custom. Open Edition is free and source-available (Postgres, MongoDB, MySQL, SQL Server) with the core sync engine, Sync Rules and all client SDKs; Enterprise Self-Hosted adds custom write checkpoints + SOC 2.",
+   "implication": "10,000 concurrent students = 10,000 concurrent connections = Pro at $49 + 9 \u00d7 $30 = ~$319/mo in connection charges alone, before data. Model this early. The Open Edition self-hosted on GCP is a credible cost lever, but you then own scaling the sync service \u2014 and custom write checkpoints are NOT in Open Edition.",
+   "confidence": "high",
+   "source": "https://www.powersync.com/pricing"
+  },
+  {
+   "title": "WatermelonDB is stalled; Legend-State's stable release is 2 years old and its Supabase plugin is beta",
+   "detail": "@nozbe/watermelondb latest 0.28.0 published 2025-04-07; next 0.28.1-0 published 2025-07-24; GitHub Nozbe/WatermelonDB 11,751 stars but last push 2025-08-11 \u2014 ~11 months of no activity as of 2026-07-25, with 302 open issues. @legendapp/state latest (stable dist-tag) is 2.1.15 from 2024-08-30; the actively developed line is 3.0.0-beta.48 (2026-07-12) \u2014 i.e. v3 has been in beta for ~22 months. Supabase's own Legend-State guide is dated 2024-09-23 and uses @legendapp/state@beta with AsyncStorage persistence and required created_at / updated_at / deleted columns plus a trigger; changesSince:'last-sync'.",
+   "implication": "WatermelonDB's popularity is legacy popularity \u2014 do not pick it for a new RN 0.86 app despite the many Supabase+WatermelonDB tutorials. Legend-State v3 is attractive (fine-grained reactivity, first-party Supabase sync plugin, MMKV/AsyncStorage persistence) but you would be shipping a beta and its persistence is AsyncStorage, not SQLite, which is wrong for a 50k-question bank. Reserve Legend-State for UI/session state, not the question corpus.",
+   "confidence": "high",
+   "source": "https://github.com/Nozbe/WatermelonDB"
+  },
+  {
+   "title": "expo-sqlite 57 now has libSQL sync + changeset APIs, and Expo publishes an official local-first guide",
+   "detail": "expo-sqlite ~57.0.1. It exposes sync push/pull/checkpoint methods against a remote libSQL server, session-extension changeset APIs (create changeset sync/async, invert changeset), and expo-sqlite/localStorage/install as a drop-in localStorage. Turso Offline Sync is explicitly 'beta quality and not yet recommended for production\u2026 no durability guarantees during the beta period.' Expo's official local-first guide lists Legend-State, TinyBase, expo-sqlite, Yjs, Prisma (early access), Jazz, LiveStore, Turso, Instant, RxDB \u2014 and warns 'tools available today are still in their early stages', so builders should expect to solve emerging problems themselves. Notably PowerSync and ElectricSQL are not in that list. Alternative driver: @op-engineering/op-sqlite 17.1.2 (2026-07-05), GitHub OP-Engineering/op-sqlite 1,023 stars, last push 2026-07-14, only 5 open issues \u2014 the fastest RN SQLite driver and PowerSync's own backing store via @powersync/op-sqlite.",
+   "implication": "Two viable stacks: (A) PowerSync + @powersync/op-sqlite (managed sync, server-authoritative, costs money at scale); (B) expo-sqlite or op-sqlite + a hand-rolled pull/push sync against Supabase using updated_at watermarks + soft deletes (free, but you own conflict semantics). Given exam integrity is server-authoritative anyway, (B) is defensible for the read-mostly question bank and (A) is over-engineering if attempts are simply POSTed. Do not build on Turso Offline Sync while it is beta.",
+   "confidence": "high",
+   "source": "https://docs.expo.dev/guides/local-first/"
+  },
+  {
+   "title": "Hermes V1 costs 25\u201330% more Android RAM \u2014 a real problem on 4 GB Indian devices",
+   "detail": "Expo SDK 57 known issue: 'importing react-native-reanimated can increase your app's memory usage by 25\u201330%' due to Hermes V1 changes; workaround is enabling worklets bundle mode. Corroborated by react-native issue #57059: '[Android] Higher memory usage on 0.85.x vs 0.83.x with the new Hermes (~25\u201330% more RAM, same app)'. Hermes V1 became the default engine for iOS and Android in RN 0.84 (rewritten compiler, new bytecode format, improved JIT, Hades concurrent GC). Hermes V1 is not Static Hermes: it does not compile JS to a native binary, does not use type information, and JIT is not yet enabled.",
+   "implication": "Enable worklets bundle mode in SDK 57 and measure RSS on a 4 GB device before and after. Combined with WebView memory this is the app's tightest constraint. Verify .hbc files are actually in the release bundle if startup regresses.",
+   "confidence": "high",
+   "source": "https://github.com/react/react-native/issues/57059"
+  },
+  {
+   "title": "India 2026 device reality: entry-level collapsed to 8% share and base models are regressing to 4 GB RAM",
+   "detail": "Entry-level smartphone share in India fell from 18% a year earlier to 8% in early 2026; sub-USD 100 shipments dropped 59% YoY in Q1 2026 due to AI-driven memory-price inflation. Memory is now 43% of the bill of materials for sub-Rs 30,000 phones. The 4\u20138 GB RAM segment was 42.3% of the market in 2025, and 2026 low-end base models are expected to return to 4 GB. Network side: average monthly data use per user crossed 31 GB (up from 27.5 GB in 2024, 18% 5-yr CAGR); 5G is ~47% of mobile broadband traffic nationally, 58% in metros; 892 M active 4G devices of which 383 M are 5G-capable; Jio averaged 122.9 Mb/s download (Jul 2025\u2013Jun 2026).",
+   "implication": "Target device profile: 4 GB RAM, 720p\u20131080p, Snapdragon 4-series / Dimensity 6000-series, Android 13\u201315. Bandwidth is actually decent and cheap (31 GB/month) \u2014 so a 3\u20136 MB chapter download of pre-rendered question content is fine, but RAM is the scarce resource. Optimise for memory (WebView count, image decode size, Hermes RSS), not for bytes over the wire.",
+   "confidence": "medium",
+   "source": "https://www.business-standard.com/technology/tech-news/smartphone-market-ai-driven-memory-inflation-pushes-india-s-budget-smartphones-out-of-reach-126051401165_1.html"
+  },
+  {
+   "title": "EAS Update economics: MAU-based, and full-bundle downloads unless bundle diffing is enabled",
+   "detail": "Tiers: Free $0 \u2014 1,000 MAU / 100 GiB bandwidth; Starter $19/mo \u2014 3,000 MAU / 100 GiB; Production $199/mo \u2014 50,000 MAU / 1 TiB; Enterprise custom \u2014 1,000,000+ MAU / 40 TiB. An MAU is a unique user who downloads at least one update that month; three downloads = one MAU but you pay bandwidth for all three. Overage on Starter+: $0.10/GiB edge bandwidth, $0.05/GiB storage; each additional MAU includes 40 MiB of edge bandwidth. By default every OTA update ships the entire JS bundle \u2014 a 12 MB bundle re-downloads fully for a one-line change. Bundle diffing is in beta (SDK 55+, Hermes only). Expo SDK 57 pins expo-updates ~57.0.10. Separately, Expo DOM components reportedly do not support OTA updates.",
+   "implication": "At 10,000 students, Production ($199/mo, 50,000 MAU / 1 TiB) is the right tier. With a 12 MB bundle and 4 updates/month, 10,000 users \u00d7 4 \u00d7 12 MB \u2248 480 GB \u2014 inside 1 TiB but not by much. Crucially: ship question-bank content through Supabase/CDN JSON, NOT through the JS bundle. Use EAS Update only for UI and logic fixes. Enable bundle diffing once it leaves beta.",
+   "confidence": "medium",
+   "source": "https://docs.expo.dev/billing/usage-based-pricing/"
+  },
+  {
+   "title": "expo-image is the correct image layer; recyclingKey is mandatory inside recycled lists",
+   "detail": "expo-image ~57.0.1 in SDK 57 (npm latest 57.0.1, 2026-07-15). Wraps SDWebImage on iOS and Glide on Android \u2014 off-JS-thread decode, disk persistence, request deduplication, and downsampling to target dimensions rather than decoding the full source. cachePolicy 'memory-disk' is the recommended default. The recyclingKey prop resets view content when a view is recycled and is described as 'very important in lists'. SDK 57 added cache seeding/reading methods to expo-image. Known bug: expo/expo #26177 \u2014 cachePolicy 'disk' uses as much memory as 'memory'.",
+   "implication": "For image-based questions (scanned PYQs, diagrams, circuit figures) use expo-image with cachePolicy='memory-disk', an explicit recyclingKey={question.id}, a blurhash/thumbhash placeholder, and server-side pre-resizing to the exact display width. Combined with FlashList recycling this is the pattern that keeps a 90-question paper scrollable on 4 GB. Also use expo-image's new cache-seeding API to pre-warm a downloaded chapter's images for offline mocks.",
+   "confidence": "high",
+   "source": "https://docs.expo.dev/versions/latest/sdk/image/"
+  },
+  {
+   "title": "Shared element transitions: iOS-only zoom transition in expo-router; cross-platform version still behind a flag",
+   "detail": "Expo SDK 55+ exposes Apple's iOS 18 Zoom Transition through expo-router's Link component \u2014 'an alpha API available on iOS only\u2026 the API is subject to breaking changes', gracefully falling back to normal navigation on Android and iOS 17 and earlier. Cross-platform gesture-driven native shared element transitions are announced as coming to Expo Router via Reanimated but are 'not production-ready yet and behind a feature flag'. react-native-shared-element has not shipped in Expo Go since SDK 49.",
+   "implication": "Do not design the navigation choreography around shared element transitions \u2014 the majority of your users are on Android where it does not exist. Achieve continuity instead with matched-position fades and a Reanimated 4 CSS transition on transform/opacity, which works identically on both platforms and is cheaper.",
+   "confidence": "medium",
+   "source": "https://docs.expo.dev/router/advanced/zoom-transition/"
+  },
+  {
+   "title": "react-native-enriched-html is a genuinely native rich-text option, but it has no math and was just renamed",
+   "detail": "Software Mansion's react-native-enriched (0.8.1, 2026-06-16) has been renamed to react-native-enriched-html (1.0.1, 2026-07-13); 'the original package will not receive any further updates or bug fixes'. It is a fully native rich text input with synchronous styling, live style detection and HTML parse/serialize; New Architecture (Fabric) only; supports RN 0.81\u20130.85 (note: 0.86 not yet listed); Android + iOS, Web experimental. Sibling react-native-enriched-markdown 0.7.4 (2026-07-09) renders Markdown as native text. Math support is an open request (#109/#439). For comparison, react-native-render-html is dead (6.3.4, 2022-01-24); its engine @native-html/transient-render-engine is at 12.0.1 (2026-05-07). react-native-marked 8.1.1 (2026-07-13) is a maintained markdown-to-native renderer.",
+   "implication": "Best-of-both architecture: render non-math prose natively (react-native-enriched-html or react-native-marked \u2192 real RN Text, selectable, themable, cheap) and drop into the single shared WebView or a pre-rendered image only for the math/chem fragments. This avoids paying WebView cost for the ~40% of JEE/NEET questions that are pure text.",
+   "confidence": "medium",
+   "source": "https://enriched.swmansion.com/html/"
+  }
+ ],
+ "recommendations": [
+  "STORAGE FORMAT \u2014 store LaTeX source as the single canonical column, plus derived caches. Schema: questions.body_latex TEXT (canonical, authored via TipTap+MathLive, always editable and diffable), questions.body_html TEXT (KaTeX renderToString output, regenerated by a Supabase Edge Function trigger on write \u2014 measured 0.103 ms/expr so regenerating the whole bank is seconds), questions.body_mathml TEXT (KaTeX output:'mathml', 205\u2013484 B gz, used for accessibility + Postgres full-text search after stripping tags), questions.plain_text TEXT (LaTeX stripped to searchable words, feeds a tsvector GIN index), and optionally questions.body_ast JSONB (MathJSON from MathLive) only if you later need symbolic answer-equivalence checking. Rationale: LaTeX is compact, human-editable, diff-friendly and is what admins actually type; HTML is a disposable cache you can regenerate when KaTeX or your theme changes; pre-rendered SVG/PNG is a dead end for the primary path because it is 2.5x larger, 11x slower to produce, unsearchable, un-restylable, and breaks dark mode and font scaling. Never make SVG or HTML the source of truth.",
+  "MATH RENDERING ARCHITECTURE \u2014 'one WebView per screen, never per row'. Build a single persistent <WebView> component (`MathCanvas`) mounted once per question-viewing screen, loading a locally bundled, fully offline HTML asset (~590 KB: katex.min.js 272 KB + katex.min.css 25 KB + 20 woff2 fonts 260 KB + mhchem.min.js 34 KB; no CDN, no network). Push question HTML into it via injectJavaScript / postMessage as the student navigates, and receive measured content height back via onMessage to size the container. Render everything that is NOT math \u2014 stems, options, tags, chrome, timer, palette \u2014 as real React Native views so the WebView holds only the typeset fragment. For the practice FEED (a FlashList of many questions) do not use a WebView at all: display the server-pre-rendered HTML in react-native-enriched-html / react-native-marked, or fall back to a pre-rendered PNG/SVG served from Supabase Storage via expo-image with recyclingKey. Prototype-validate this on a 4 GB Redmi/Realme before committing.",
+  "OFFLINE-FIRST \u2014 split the problem in two rather than adopting one heavyweight sync framework. (1) Question bank = read-only, server-owned: sync with expo-sqlite (SDK 57) or @op-engineering/op-sqlite 17.1.2 using a simple updated_at watermark pull per (chapter, exam) with soft deletes; wrap it in a 'Download chapter for offline' UX with a visible size estimate. (2) Student writes (answers, notes, attempt state) = queue + server-authoritative reconcile: write locally with a client-generated UUID plus client_seq and client_timestamp, POST the queue to a Supabase Edge Function on reconnect, and let the server enforce first-write-wins per (attempt_id, question_id), reject writes after the attempt window closed, and recompute the score. Adopt PowerSync 2.0.0 only if you find you need Sync Streams' row-level fan-out; budget ~$319/mo at 10k concurrent connections, or self-host Open Edition on GCP (noting custom write checkpoints are Enterprise-only). Explicitly reject WatermelonDB (11 months stale) and Turso Offline Sync (beta, no durability guarantees).",
+  "ADMIN AUTHORING \u2014 TipTap 3.29.0 + @tiptap/extension-mathematics (now MIT) + MathLive 0.110.0 as the virtual math keyboard, in a WEB admin console, not inside the RN app. MathLive gives 800+ LaTeX commands, a genuinely usable mobile virtual math keyboard, and export to LaTeX / MathML / MathJSON. Pin katex to 0.17.x in the editor because extension-mathematics still peer-deps ^0.16.4 || ^0.17.0. Give authors one-tap snippets for \\ce{}, \\pu{}, \\frac, \\int, \\vec, matrix and equilibrium arrows. For chemical structures, embed ketcher-react 3.17.1 in the admin console only, export MOL/SMILES, and render server-side with Python RDKit to SVG stored in Supabase Storage \u2014 never ship the 6.6 MB RDKit WASM to the client. If you need in-question inline structures, use smiles-drawer 2.4.1 (59 KB gzip) inside the same math WebView.",
+  "MOTION SYSTEM \u2014 publish a 5-token motion file and forbid ad-hoc animation. Durations: 150 ms (state change: option select, chip toggle), 200 ms (small enter/exit), 300 ms (screen/sheet transition), 350 ms (modal, bottom sheet), and nothing over 400 ms anywhere in the timed-test flow. Easing: standard cubic-bezier(0.2,0,0,1) for in-place property changes, emphasized-decelerate cubic-bezier(0.05,0.7,0.1,1) for entering, emphasized-accelerate cubic-bezier(0.3,0,0.8,0.15) for exiting. Implement with Reanimated 4.5.x CSS Transitions/Animations (declarative, easier to optimise), not Moti (abandoned, Reanimated-3-only). No bounce, no overshoot >1.0, no spring for anything a student sees while a timer is running. Stagger at most ~20 children, 20\u201330 ms apart. Respect prefers-reduced-motion / AccessibilityInfo.isReduceMotionEnabled and collapse everything to a 100 ms opacity fade.",
+  "PERFORMANCE BUDGETS AND GUARDRAILS \u2014 enforce as CI/QA checks on a 4 GB Android reference device: at most 1 live WebView per screen (assert in dev); \u2264100 simultaneously animated components; every Skia Canvas has opaque set (SurfaceView, not TextureView \u2014 this alone cut RenderThread CPU 50\u201365% and janky frames from 85% in the Margelo case study); no Skia canvas mounted while off-screen or idle; FlashList v2 with getItemType keyed on question archetype, maintainVisibleContentPosition={{disabled:true}} on the question list, useLayoutState in any row whose height changes after mount, and never nested inside a ScrollView (issue #1966 crashes Oppo/Samsung); expo-image everywhere with cachePolicy='memory-disk' + recyclingKey + server-side pre-resizing; enable worklets bundle mode to claw back the 25\u201330% Hermes V1 Android RAM regression.",
+  "VERSION PINNING POLICY \u2014 take Expo SDK 57's pins as the baseline (react-native 0.86.0, react-native-webview 13.16.1, @shopify/flash-list 2.0.2, react-native-svg 15.15.4, react-native-reanimated 4.5.0, react-native-worklets 0.10.0, @shopify/react-native-skia 2.6.2, expo-sqlite/expo-image/expo-router/expo-updates ~57.x) and use `npx expo install` rather than chasing npm latest. Consider deliberate, tested overrides for @shopify/flash-list (2.0.2 \u2192 2.3.2, 8 months of bugfixes) and react-native-webview (13.16.1 is two majors behind npm's 14.0.1/15/16 \u2014 audit whether the memory-leak and Android fixes you need are in 13.16.1). Pin katex exactly and treat a KaTeX minor bump as a breaking change requiring visual regression tests, because 0.18.0 renamed internal CSS classes.",
+  "SHIP QUESTION CONTENT OVER THE NETWORK, NOT IN THE JS BUNDLE. EAS Update bills per-MAU with full-bundle downloads by default (a 12 MB bundle re-downloads entirely for a one-line change; diffing is beta on SDK 55+/Hermes only). At 10k students, Production tier is $199/mo for 50,000 MAU / 1 TiB. Serve the question bank as versioned JSON/HTML from Supabase Storage behind a CDN with content-hash filenames, and reserve EAS Update strictly for UI and logic hotfixes. Also verify before adopting Expo DOM Components ('use dom') that the documented 'no OTA update support' limitation still holds in SDK 57 \u2014 if it does, that rules them out for the core reader despite being the ergonomically nicest KaTeX host."
+ ],
+ "pitfalls": [
+  "The classic killer, quantified: one WebView per FlatList/FlashList row. Production reports put each WebView at 150\u2013200 MB, and mature systems cap live instances at ~3 with LRU eviction. With India's 2026 entry-level baseline regressing to 4 GB RAM, 5 simultaneously mounted WebViews will OOM-kill the app mid-test. FlashList recycling makes it worse, not better, because recycled rows tear down and re-instantiate WebViews during fast scroll \u2014 and WebView instantiation is 'an exceptionally heavy operation'. Additionally react-native-webview issue #3168 documents an Android leak where every change to the onMessage prop adds a BatchedBridge callback that is never released \u2014 exactly what happens when a recycled row rebinds its handler.",
+  "Adopting an abandoned math library because it ranks well in search. react-native-math-view is ARCHIVED (last push 2024-09-05, npm 3.9.5 from 2021), react-native-mathjax-html-to-svg last published 2023-06-30, react-native-mathjax-text-svg 2023-11-30, react-native-mathjax-svg 2021, react-native-latex 2020, react-native-render-html 2022-01-24, Quill 2024-11-30, Moti 2025-01-29 (repo last push 2025-03-11, still Reanimated-3-only). All of these predate the removal of the legacy bridge in RN 0.82 and/or Fabric-only Reanimated 4, so they range from unmaintained to structurally incompatible. Any library whose last release predates mid-2025 should be presumed broken on RN 0.86.",
+  "Silent version-lock traps in the math toolchain. @tiptap/extension-mathematics@3.29.0 peer-deps katex '^0.16.4 || ^0.17.0' \u2014 it does not accept katex 0.18.x. Meanwhile katex 0.18.0 (2026-07-17) introduced CSS class prefixing that breaks any custom .katex-* selectors, and 0.17.0 broke the internal __defineFunction API. If the admin editor and the mobile renderer install different katex majors you will get subtly different typesetting between authoring preview and student view \u2014 the worst possible bug class for an exam product. Decide the katex version once, globally, and gate upgrades behind visual regression tests.",
+  "Treating pre-rendered SVG or PNG as the storage format. MathJax SVG is 2.5x larger and 11x slower to produce than KaTeX HTML (measured: 3,936 B vs 829 B gzip and 1.14 ms vs 0.103 ms for a typical JEE integral). Worse, images are unsearchable, cannot be restyled for dark mode or dynamic type, cannot reflow at different widths, and cannot be edited \u2014 every typo fix requires a re-render pipeline run. Images are a legitimate FALLBACK for the feed, never the canonical store. Symmetrically, storing HTML as canonical locks you into today's KaTeX version and destroys editability.",
+  "Assuming MathML alone is enough on Android. caniwebview marks MathML 'widely available' in both WKWebView and Android WebView, but Chromium ships only MathML Core, which is an incomplete subset; Firefox has strong support and Chrome does not. Complex JEE Advanced constructs \u2014 matrices/determinants, multi-line aligned equations, stretchy mhchem equilibrium arrows, large radicals \u2014 are exactly where MathML Core degrades. Ship KaTeX HTML+CSS as the visual path and use MathML only as an accessibility/search layer.",
+  "Skia rendering into a TextureView on low-end Android. The Margelo Pingo investigation on a sub-$100 120 Hz device found 79% of frames flagged for slow bitmap uploads and 85% janky frames purely from TextureView compositing (GPU touching canvas pixels 2\u20133x per frame across Skia \u2192 HWUI \u2192 SurfaceFlinger). Also: usePathValue and usePathInterpolation can create worklets that re-dirty their own outputs, re-recording an idle canvas forever (17\u201332 ms frame time on a canvas showing nothing). Both bugs are invisible on a flagship and catastrophic on the devices your users actually own.",
+  "The Hermes V1 memory regression compounding with WebView memory. Expo SDK 57's own known-issues section states importing react-native-reanimated can raise Android memory 25\u201330% under Hermes V1 (corroborated by react-native issue #57059 comparing 0.85.x to 0.83.x). Reanimated is unavoidable in this app. Combined with a WebView and image caches on a 4 GB device, you can hit the Android per-process heap limit. Enable worklets bundle mode and measure RSS on the reference device from week one, not at launch.",
+  "PowerSync's free tier (50 concurrent connections, 2 GB/month, projects deactivate after 1 week idle) will pass every demo and fail the first real mock test. The stated scale target is 10,000+ concurrent students; that is 10,000 concurrent connections, i.e. Pro at $49 + 9 \u00d7 $30 = ~$319/mo in connection charges before any data cost. Custom write checkpoints \u2014 the feature you would want if attempts are processed asynchronously via a queue \u2014 are Team/Enterprise or Enterprise-Self-Hosted only, not in the free Open Edition.",
+  "Designing navigation around shared element transitions. expo-router's zoom transition is an alpha, iOS-18-only API that silently falls back to a plain push on Android and iOS 17; the cross-platform Reanimated implementation is still behind a feature flag and 'not production-ready'. Since the overwhelming majority of Indian JEE/NEET users are on Android, any choreography that depends on shared elements will be seen by almost nobody and will make the two platforms feel like different products.",
+  "FlashList v2 defaults that break exam UX: maintainVisibleContentPosition is ON by default and causes items to move when data re-orders (e.g. when a randomised question palette re-sorts, or answers sync in), and issue #1966 reports an infinite render loop / crash on specific Oppo and Samsung devices when FlashList v2 is nested inside a ScrollView \u2014 a very natural thing to do for a 'scrollable question with a palette below'. Also, rows whose height changes after mount (late-loading diagrams) leave blank gaps unless useLayoutState is used."
+ ],
+ "openQuestions": [
+  "Does Expo SDK 57 still block OTA updates for DOM components ('use dom')? The docs page says they 'currently don't support over-the-air updates', but the page is not SDK-versioned. This single fact decides whether DOM components or a raw react-native-webview hosts the KaTeX renderer. Verify against the SDK 57 changelog and an actual EAS Update test build.",
+  "What is the real measured memory and first-paint cost of ONE persistent WebView loading the 590 KB local KaTeX bundle on a 4 GB Android device (Redmi 13C / Realme C-series class)? The 150\u2013200 MB figure comes from micro-frontend WebViews loading full web apps; a static local HTML page with KaTeX should be far cheaper, but this must be measured before the architecture is locked.",
+  "Why does Expo SDK 57 pin react-native-webview to 13.16.1 when npm has 14.0.1 latest and 15.0.0/16.0.0 published? Is 13.16.1 chosen for Fabric stability, and do the Android memory-leak fixes (issue #3168) and any 0.86 compatibility fixes exist in 13.16.1 or only in 14+?",
+  "Is there a maintained Fabric-compatible bridge to SwiftMath (iOS) and AndroidMath (Android)? react-native-enriched-markdown issue #109 shows a linked PR #119 marked closed \u2014 did that PR actually land native math rendering, or was it closed unmerged? If a native math text run exists, it would remove the WebView entirely and is worth a week of evaluation.",
+  "Does @tiptap/extension-mathematics have a roadmap for katex 0.18 support, given 0.18.0's CSS class-prefix breaking change? If not, how long can the admin editor safely stay on katex 0.17.x while the renderer is on 0.18.x, and are the rendered outputs pixel-identical?",
+  "At 10,000 concurrent students, what is the actual PowerSync bill (connections + GB synced) versus the engineering cost of a hand-rolled expo-sqlite/op-sqlite watermark sync against Supabase? Needs a modelled comparison including the Open Edition self-hosted path on GCP and its lack of custom write checkpoints.",
+  "How does FlashList v2.3.2 behave with rows containing pre-rendered KaTeX HTML of highly variable height (1 line to 15 lines) under fast fling on a 4 GB device \u2014 specifically whether useLayoutState is sufficient or whether server-supplied height hints per question are needed to avoid blank areas?",
+  "Is smiles-drawer 2.4.1 output quality acceptable for NEET/JEE organic chemistry (stereochemistry wedges, aromatic rings, reaction mechanisms) compared to RDKit's renderer? If not, is server-side RDKit \u2192 SVG the only acceptable path, and what is the storage/CDN cost for a few thousand structures?",
+  "What is the practical file-size and startup cost of the release APK/AAB with the KaTeX asset bundle, Reanimated, Skia, WebView and expo-image included, and does it stay under the thresholds where Play Store install conversion drops in India? Needs a real EAS build measurement, including per-ABI splits.",
+  "Does Reanimated 4's CSS Animations API have measurably lower overhead than the imperative useAnimatedStyle path on low-end Android, as Software Mansion implies ('easier to optimize because the team understands more details about what attributes of which components are being animated')? Unverified \u2014 needs a benchmark on the reference device before standardising the whole motion system on it."
+ ],
+ "sources": [
+  "https://github.com/ShaMan123/react-native-math-view",
+  "https://github.com/software-mansion-labs/react-native-enriched-markdown/issues/109",
+  "https://github.com/software-mansion/react-native-enriched/issues/439",
+  "https://github.com/KaTeX/KaTeX/blob/main/CHANGELOG.md",
+  "https://github.com/KaTeX/KaTeX/blob/main/contrib/mhchem/README.md",
+  "https://katex.org/docs/api",
+  "https://www.npmjs.com/package/katex",
+  "https://caniwebview.com/features/web-feature-mathml/",
+  "https://docs.mathjax.org/en/v4.0/upgrading/whats-new-4.0.html",
+  "https://www.mathjax.org/MathJax-v4.0.0-available/",
+  "https://sph.sh/en/posts/mobile-micro-frontends-react-native-expo-webviews/",
+  "https://github.com/react-native-webview/react-native-webview/issues/3168",
+  "https://docs.expo.dev/guides/dom-components/",
+  "https://expo.dev/changelog/sdk-57",
+  "https://github.com/expo/expo/blob/sdk-57/packages/expo/bundledNativeModules.json",
+  "https://reactnative.dev/blog/2026/06/11/react-native-0.86",
+  "https://github.com/reactwg/react-native-new-architecture/discussions/290",
+  "https://shopify.engineering/flashlist-v2",
+  "https://github.com/shopify/flash-list",
+  "https://shopify.github.io/flash-list/docs/known-issues/",
+  "https://shopify.github.io/flash-list/docs/v2-changes/",
+  "https://github.com/Shopify/flash-list/issues/1966",
+  "https://docs.swmansion.com/react-native-reanimated/docs/guides/performance/",
+  "https://docs.swmansion.com/react-native-reanimated/docs/guides/compatibility/",
+  "https://blog.swmansion.com/reanimated-4-stable-release-the-future-of-react-native-animations-ba68210c3713",
+  "https://blog.margelo.com/profiling-skia-reanimated-low-end-android",
+  "https://github.com/nandorojo/moti/issues/391",
+  "https://github.com/material-components/material-components-android/blob/master/docs/theming/Motion.md",
+  "https://m3.material.io/styles/motion/easing-and-duration",
+  "https://docs.powersync.com/integrations/supabase/guide",
+  "https://powersync.com/blog/turnkey-backend-functionality-conflict-resolution-for-powersync",
+  "https://www.powersync.com/pricing",
+  "https://docs.powersync.com/handling-writes/custom-write-checkpoints",
+  "https://github.com/Nozbe/WatermelonDB",
+  "https://supabase.com/blog/local-first-expo-legend-state",
+  "https://docs.expo.dev/guides/local-first/",
+  "https://docs.expo.dev/versions/latest/sdk/sqlite/",
+  "https://turso.tech/blog/turso-offline-sync-public-beta",
+  "https://github.com/OP-Engineering/op-sqlite",
+  "https://github.com/react/react-native/issues/57059",
+  "https://docs.expo.dev/billing/usage-based-pricing/",
+  "https://stalliontech.io/expo-eas-update-pricing",
+  "https://docs.expo.dev/versions/latest/sdk/image/",
+  "https://github.com/expo/expo/issues/26177",
+  "https://docs.expo.dev/router/advanced/zoom-transition/",
+  "https://mathlive.io/",
+  "https://www.npmjs.com/package/@tiptap/extension-mathematics",
+  "https://tiptap.dev/docs/editor/extensions/nodes/mathematics",
+  "https://github.com/rdkit/rdkit-js",
+  "https://github.com/epam/ketcher",
+  "https://www.npmjs.com/package/smiles-drawer",
+  "https://enriched.swmansion.com/html/",
+  "https://www.business-standard.com/technology/tech-news/smartphone-market-ai-driven-memory-inflation-pushes-india-s-budget-smartphones-out-of-reach-126051401165_1.html",
+  "https://www.business-standard.com/industry/news/india-s-average-monthly-data-usage-per-user-hits-31-gb-in-2025-nokia-126033100536_1.html"
+ ]
+}

@@ -1,0 +1,74 @@
+.math-body {
+  font-size: var(--text-lg);
+  line-height: 1.7;
+  color: var(--fg);
+  /* Long expressions scroll inside their own box; the page never scrolls
+     sideways, which at 200% text scale would otherwise be constant. */
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.math-body p + p {
+  margin-top: var(--space-3);
+}
+
+.math-body img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.math-body table {
+  border-collapse: collapse;
+  margin: var(--space-3) 0;
+}
+
+.math-body th,
+.math-body td {
+  border: var(--border-hairline) solid var(--border);
+  padding: var(--space-2) var(--space-3);
+  text-align: left;
+}
+
+/* KaTeX renders light-on-light in a dark theme unless it inherits colour. */
+.math-body .katex,
+.math-body .katex-display {
+  color: inherit;
+}
+
+.math-body .katex-display {
+  margin: var(--space-4) 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: var(--space-1);
+}
+
+.math-fallback {
+  border: var(--border-hairline) solid var(--warning);
+  background: var(--warning-soft);
+  border-radius: var(--radius-md);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.math-fallback__notice {
+  color: var(--fg);
+  font-size: var(--text-sm);
+}
+
+.math-fallback__source {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--surface);
+  border: var(--border-hairline) solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3);
+  margin: 0;
+  max-height: 20rem;
+  overflow: auto;
+}

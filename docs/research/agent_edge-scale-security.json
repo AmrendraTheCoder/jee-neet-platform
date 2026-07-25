@@ -1,0 +1,434 @@
+{
+ "area": "Scale, concurrency, abuse and security edge cases for a React Native + Expo JEE/NEET exam app on Supabase + Redis + GCP, at 10,000 concurrent students",
+ "cases": [
+  {
+   "id": "EC-HERD-01",
+   "scenario": "10,000 students press \"Start Test\" between 09:59:55 and 10:00:05. Each RN client issues 3-6 PostgREST calls (attempt row, paper metadata, 90 questions, sections, server time).",
+   "failureMode": "Connection pool exhaustion. Supabase direct max_connections is 60 on Nano/Micro and only reaches 500 on 12XL+ (https://supabase.com/docs/guides/platform/compute-and-disk). Supabase explicitly warns not to raise the Supavisor pool past 40% of Database Max Connections when PostgREST is heavily used (https://supabase.com/docs/guides/database/connection-management). 30k-60k requests in ~10s against a <=200-connection pool queues, then 504/timeouts; students see a blank paper and hammer retry.",
+   "mitigation": "1) Collapse the whole paper fetch into ONE `security definer` RPC (`rpc/start_attempt`) returning attempt + sections + 90 question stems in a single round trip. 2) Connect via Supavisor transaction mode (port 6543), never session mode, for the mobile-facing path. 3) Pre-scale compute 48h before every scheduled test and hold it for 24h after; Supabase asks Team/Enterprise customers to notify support before traffic surges (https://supabase.com/docs/guides/platform/going-into-prod). 4) Add a server-issued admission token with a +/-90s randomised `start_allowed_at` so arrivals spread over 3 minutes without changing the graded duration. 5) Load-test with k6 at 1.5x target on a staging project, as Supabase's prod checklist recommends.",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-HERD-02",
+   "scenario": "Question images live in a private Storage bucket. The app calls `createSignedUrl` per image per student, so 10,000 students x 90 images generates 900,000 distinct URLs for 90 underlying objects.",
+   "failureMode": "Total CDN bypass. Supabase Smart CDN treats each unique signing token as a SEPARATE cache entry: \"Reusing the same signed URL improves cache hits, while generating new URLs per request eliminates caching benefits\" (https://supabase.com/docs/guides/storage/cdn/smart-cdn). Every request becomes an origin fetch. At 150 KB/image that is ~135 GB of origin egress per test instead of ~13.5 MB, plus a Storage-service connection storm.",
+   "mitigation": "Generate ONE signed URL per object per test window, server-side, at paper-publish time; store the URL string in the paper manifest and hand the same string to all 10,000 clients (expiresIn = test window + 2h). Alternatively use a public bucket with unguessable UUIDv4 object paths, which Supabase documents as the high-CDN-cache-performance option (https://supabase.com/docs/guides/storage/serving/downloads). Set long `cacheControl` on upload. Never mint per-user URLs for shared immutable assets.",
+   "severity": "critical",
+   "layer": "infra"
+  },
+  {
+   "id": "EC-HERD-03",
+   "scenario": "A brand-new paper is published 20 minutes before the 10:00 start. The CDN edge is completely cold for all 90 images.",
+   "failureMode": "Classic cache stampede: many clients request the same uncached resource simultaneously, which AWS documents as leading to \"throttling/brownout\" of the downstream (https://aws.amazon.com/builders-library/caching-challenges-and-strategies/). The first ~10,000 requests per image all miss and hit Storage origin before the first response populates the edge.",
+   "mitigation": "1) Cache-warm job: a Cloud Run/Edge Function that GETs every asset URL from N geographic points 30-60 min before start, gated on paper `published_at`. 2) Enable Cloudflare Tiered Cache in front of Storage - the upper tier acts as an origin shield and \"concentrates connections to origin servers so they come from a small number of data centers\" (https://developers.cloudflare.com/cache/how-to/tiered-cache/); Smart Topology is available on all plans including Free. 3) Ship a client-side prefetch phase: after admission, the app downloads and pins all 90 images to disk during a mandatory 60-90s \"Preparing your paper\" screen BEFORE the timer starts. This converts a 10s spike into a 15-minute smear and makes the test resilient to mid-test connectivity loss.",
+   "severity": "high",
+   "layer": "infra"
+  },
+  {
+   "id": "EC-HERD-04",
+   "scenario": "The first wave of requests times out. The RN networking layer (or TanStack Query defaults) retries on a fixed delay, so all 10,000 failed clients retry in near-lockstep at t+1s, t+2s, t+4s.",
+   "failureMode": "Retry amplification turns a transient 20% error rate into a sustained self-inflicted DDoS; synchronized retries across distributed clients trigger cascading outages (https://builder.aws.com/content/3EumjoZascWd1oZiEgL8ORlv3qE/timeouts-retries-and-backoff-with-jitter). The system never drains because every recovery window is immediately re-saturated.",
+   "mitigation": "Full-jitter backoff on every client call: `sleep = random(0, min(cap, base * 2^attempt))` with base=250ms, cap=20s. Cap total attempts at 4. Add a client-side retry token bucket (e.g. 10 tokens, refill 1/5s) so a client physically cannot retry more than N times per minute regardless of how many endpoints fail. Honour `Retry-After`. Server side, shed load with a cheap 429 at the edge rather than letting requests reach Postgres.",
+   "severity": "high",
+   "layer": "client"
+  },
+  {
+   "id": "EC-HERD-05",
+   "scenario": "Every student subscribes to a Realtime channel on test entry for the live timer, announcements and leaderboard.",
+   "failureMode": "Quota wall. Pro without spend cap tops out at exactly 10,000 concurrent connections, 2,500 channel joins/second and 2,500 messages/second (https://supabase.com/docs/guides/realtime/quotas). 10,000 students joining inside 10 seconds means ~1,000 joins/s sustained - survivable - but a 2-second stampede is 5,000 joins/s and clients get `too_many_joins` / `too_many_connections` WebSocket errors. Zero headroom at the connection ceiling means one retry loop tips the whole cohort over. Complex RLS on `realtime.messages` also \"impacts database performance and connection time, leading to higher connection latency and decreased join rates\" (https://supabase.com/docs/guides/realtime/authorization).",
+   "mitigation": "Do NOT make Realtime load-bearing for the exam. Deliver the paper and timer over plain HTTP + local monotonic clock reconciled against a server timestamp. Use Realtime only for optional/non-critical channels (announcements) with jittered connect over 60s and automatic degradation to a 30s poll. Keep RLS policies on `realtime.messages` to a single indexed lookup. Contact Supabase support to raise per-project Realtime limits before any 10k event.",
+   "severity": "high",
+   "layer": "api"
+  },
+  {
+   "id": "EC-HERD-06",
+   "scenario": "Live leaderboard implemented with `postgres_changes` subscriptions on a `leaderboard` table, one subscription per student.",
+   "failureMode": "Hard architectural ceiling. Postgres Changes \"authorizes every event against each subscriber\" and processes changes \"on a single thread to preserve their order\", so throughput does not scale with compute. Measured: with RLS, ~30 changes/s at 500 clients degrading to ~5 changes/s at 3,000 subscribers (https://supabase.com/docs/guides/realtime/postgres-changes). At 10,000 subscribers the leaderboard effectively freezes and replication lag grows unbounded.",
+   "mitigation": "Supabase's own guidance: \"If you expect more than ~3,000 concurrent subscribers on the same changes, use Broadcast instead.\" Compute the leaderboard in Redis (ZSET), snapshot the top-100 every 5-10s, and push ONE `realtime.send()` broadcast payload to a single private topic that all 10,000 clients share (https://supabase.com/docs/guides/realtime/broadcast). Individual rank is fetched on demand via RPC (`ZREVRANK`, O(log N)) rather than pushed. Accept eventual consistency and label the leaderboard \"updated 8s ago\".",
+   "severity": "high",
+   "layer": "api"
+  },
+  {
+   "id": "EC-HERD-07",
+   "scenario": "Server-authoritative timer implemented as a per-second heartbeat POST from each client to keep `time_remaining` accurate.",
+   "failureMode": "10,000 clients x 1 req/s = 10,000 rps of pure write traffic for 180 minutes = 108 million writes per test, saturating PostgREST and bloating the attempts table. Also, device clocks in India are commonly skewed by minutes; naive client-side countdown lets a student set the device clock back and gain time.",
+   "mitigation": "Store `started_at` (server `now()`), `duration_seconds` and `hard_deadline_at` once at attempt creation. Client counts down from a locally captured monotonic offset (`Date.now()` delta measured once, then `performance.now()`), never from wall clock. Heartbeat at 30-60s intervals with jitter, carrying an answer delta batch (so heartbeat and autosave are the same request) - that is ~170-330 rps, not 10,000. Server rejects any answer whose `received_at > hard_deadline_at + 30s grace`. Never trust a client-supplied elapsed time.",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-HERD-08",
+   "scenario": "At T+180min the window closes and 10,000 submissions arrive within ~60 seconds; an Edge Function grades each 90-question paper, computes percentile, updates coins, streaks and leaderboard.",
+   "failureMode": "Edge Functions cap at 256 MB memory and 2s CPU time per request (async I/O excluded), 400s wall clock on paid plans, and roughly 5,000 requests/minute for recursive invocation (https://supabase.com/docs/guides/functions/limits). Percentile computation requires reading the whole cohort, so each invocation is O(N) - 10,000 invocations each scanning 10,000 rows is 10^8 row reads in 60 seconds. Functions blow the 2s CPU budget and fail; students see \"submission failed\" on the highest-stakes action in the app.",
+   "mitigation": "Split submission from grading. Submission = one idempotent INSERT of the answer sheet with a client-generated `attempt_id` UUID, returning 200 immediately. Grading = enqueue to pgmq/Supabase Queues, which gives exactly-once delivery within the visibility timeout (https://supabase.com/docs/guides/queues, https://github.com/pgmq/pgmq), drained by a bounded worker pool (Cloud Run, concurrency 20-50) doing SET-BASED SQL grading: one `UPDATE ... FROM` grading all attempts for the paper, then one `percent_rank() OVER ()` window query for percentiles. Target <60s for the whole cohort. Show the student \"Submitted - result in ~2 minutes\" rather than blocking.",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-HERD-09",
+   "scenario": "The RN screen renders a chapter list, then per chapter fetches topics, then per topic fetches question counts and the student's mastery - 1 + 30 + 300 requests on one screen mount.",
+   "failureMode": "N+1 explosion. 10,000 students opening the practice tab = 3.3M PostgREST requests. Each PostgREST request consumes a pooler connection for its duration; the pool (capped at ~40% of max_connections when PostgREST-heavy) is exhausted by a browse screen, not even by a test.",
+   "mitigation": "Use PostgREST resource embedding to collapse the tree into one request (`?select=*,topics(*,subtopics(*))`), or better a single materialised `chapter_progress` view/RPC per student. Materialise counts nightly into a `topic_stats` table rather than `count(*)` at read time. Enforce a lint/CI rule: no `useEffect` may issue a query inside a `.map()`. Add per-screen request budgets in dev builds that throw if a screen exceeds 3 network calls.",
+   "severity": "high",
+   "layer": "client"
+  },
+  {
+   "id": "EC-SIGNUP-01",
+   "scenario": "A coaching-institute launch drives 10,000 phone/email OTP signups within 20 minutes.",
+   "failureMode": "Supabase Auth default is 30 OTPs per hour project-wide and a 60-second per-user cooldown; verification requests are IP-limited to 360/hour (not customisable) (https://supabase.com/docs/guides/auth/rate-limits). At 30/hour, 10,000 signups need ~333 hours. The launch simply fails; students see \"email rate limit exceeded\" and churn permanently.",
+   "mitigation": "Before any launch: (a) raise the customisable OTP limit in Dashboard > Authentication > Rate Limits to a value matched to the campaign (e.g. 3,000/hour) AND confirm the downstream SMS provider can sustain it; (b) configure custom SMTP - built-in email is hard-capped at 2 emails/hour on signup/recover/user endpoints; (c) stage the launch by cohort/institute code over 24-48h; (d) pre-provision accounts server-side (service role) for bulk institute enrolments and send a one-time magic link instead of self-serve OTP.",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-SIGNUP-02",
+   "scenario": "Default built-in Supabase email provider left enabled in production for confirmations and password resets.",
+   "failureMode": "\"2 emails per hour with the built-in email provider\" on /auth/v1/signup, /recover and /user (https://supabase.com/docs/guides/auth/rate-limits). Password-reset traffic the morning after a launch is throttled to 2/hour for the entire project, locking out every student who forgot their password.",
+   "mitigation": "Mandatory custom SMTP (AWS SES / Resend / Postmark) before public launch; Supabase's production checklist lists this explicitly (https://supabase.com/docs/guides/platform/going-into-prod). Disable link tracking on the SMTP provider - scanners pre-click magic links and burn single-use tokens. Warm the sending domain and configure SPF/DKIM/DMARC 2 weeks ahead or Indian ISPs will spam-folder OTP mail.",
+   "severity": "critical",
+   "layer": "infra"
+  },
+  {
+   "id": "EC-SIGNUP-03",
+   "scenario": "Scripted bot signups against the public signup endpoint, or abuse of anonymous sign-in to create disposable identities.",
+   "failureMode": "Database bloat, MAU billing inflation (Pro bills $0.00325 per MAU over 100,000 - https://supabase.com/pricing), and poisoned analytics. Supabase states bad actors \"can rapidly generate accounts to bloat your database\" and that anonymous sign-ins are only IP-limited to 30/hour (https://supabase.com/docs/guides/auth/auth-anonymous) - trivially bypassed with a residential proxy pool.",
+   "mitigation": "Enable Cloudflare Turnstile (invisible mode) or hCaptcha on signup, signin AND password reset; Supabase Auth supports both natively via the `captchaToken` option (https://supabase.com/docs/guides/auth/auth-captcha). Turnstile is WCAG 2.2 AA compliant and non-hostile to real students (https://developers.cloudflare.com/turnstile/). Layer device attestation: Play Integrity `appIntegrity` + `deviceIntegrity` on Android, App Attest on iOS, so signup requires a genuine app binary on genuine hardware. Reject anonymous sign-in entirely if the product has no guest mode.",
+   "severity": "high",
+   "layer": "api"
+  },
+  {
+   "id": "EC-SIGNUP-04",
+   "scenario": "SMS OTP cost at launch scale, plus deliberate SMS-pumping fraud (attacker triggers OTPs to premium-rate ranges they control).",
+   "failureMode": "Direct financial loss. Twilio lists India SMS at $0.0832 per outbound message (https://www.twilio.com/en-us/sms/pricing/in): 10,000 signups with an average 1.8 sends (resends + failures) = ~$1,500. An unthrottled resend loop or a pumping bot can burn five figures overnight. Indian domestic aggregators (MSG91, Airtel IQ, Kaleyra) are roughly an order of magnitude cheaper per SMS but require TRAI DLT entity + header + content-template registration before any transactional SMS can be delivered - unverified, low confidence on exact 2026 per-SMS INR rates as the pricing pages could not be fetched.",
+   "mitigation": "1) Hard per-phone cap: 3 OTPs per number per 24h, 5 per device fingerprint, enforced in a Postgres `otp_issuance` table with a unique partial index, not just in Supabase's limiter. 2) Country allowlist - only +91 (and a small manual allowlist) may receive OTP; this alone kills most pumping. 3) Turnstile before the OTP is dispatched, not after. 4) Prefer email OTP as default and SMS as fallback. 5) Enable provider-side SMS pumping protection (Twilio charges $0.025 for it). 6) Daily spend alarm on the SMS account with a hard auto-cutoff.",
+   "severity": "critical",
+   "layer": "infra"
+  },
+  {
+   "id": "EC-SIGNUP-05",
+   "scenario": "Students (or farmers) sign up with disposable/VoIP Indian numbers or temp-mail domains to create multiple accounts for the rewards economy.",
+   "failureMode": "One human becomes 50 accounts. Referral bonuses, welcome coins and giveaway entries are all multiplied; the leaderboard becomes meaningless; MAU billing inflates.",
+   "mitigation": "Use an HLR/number-lookup on signup to reject VoIP/virtual line types before sending the OTP. Maintain a denylist of disposable email domains refreshed weekly. Require a second weak identity signal for reward eligibility (Google/Apple OAuth identity linked, or an institute code issued by an admin). Critically: gate rewards, not access - let anyone register and practise, but require a verified +91 mobile plus 7 days of account age plus at least one graded full-length test before ANY coin becomes redeemable. Unverified: exact accuracy of Indian VoIP line-type detection varies by provider; treat as a signal, not a verdict.",
+   "severity": "medium",
+   "layer": "product"
+  },
+  {
+   "id": "EC-SIGNUP-06",
+   "scenario": "An entire coaching centre of 400 students sits the same mock test on one campus WiFi behind a single NAT public IP.",
+   "failureMode": "Silent mass lockout from IP-based limits that are NOT customisable: token refresh 1,800 requests/hour per IP, verification 360/hour per IP, MFA challenge/verify 15/hour per IP, anonymous sign-in 30/hour per IP (https://supabase.com/docs/guides/auth/rate-limits). 400 students refreshing a 1-hour JWT during a 3-hour test = 1,200 refreshes, close to the ceiling; add app restarts and the centre is throttled mid-exam. Students are logged out and lose the attempt.",
+   "mitigation": "1) Lengthen JWT expiry for the exam session (e.g. 4h) so no refresh is needed inside a test window, and pre-refresh once at admission. 2) Detect 429 on refresh and DO NOT sign the user out - keep the attempt alive locally, queue answers offline, and retry with jitter. 3) Never place MFA on the student role (15/hour per IP is fatal behind NAT); reserve MFA for ADMIN only. 4) For institute deployments, document the NAT limitation and consider a per-institute proxy/edge worker that fans out from multiple egress IPs. 5) Design the whole test flow to be offline-tolerant: answers persist to MMKV/SQLite and sync opportunistically.",
+   "severity": "critical",
+   "layer": "infra"
+  },
+  {
+   "id": "EC-HOT-01",
+   "scenario": "A single `leaderboards` row per contest holding `top_scores` JSON, updated by every submission; or a per-contest rank recomputed with `UPDATE ... SET rank = ...` on submit.",
+   "failureMode": "Row-level lock convoy. `FOR UPDATE` blocks all other row locks (https://www.postgresql.org/docs/17/explicit-locking.html), so 10,000 concurrent submissions serialise on one row. If each update takes 5ms the tail latency is 50 seconds; connections are held for the whole wait, cascading into pool exhaustion (see EC-HERD-01).",
+   "mitigation": "Never keep a mutable aggregate on one Postgres row in the hot path. Scores go to a Redis ZSET (`ZADD` O(log N), `ZREVRANK` O(log N) - https://redis.io/docs/latest/develop/data-types/sorted-sets/) keyed `lb:{contest_id}`. Postgres stores only the immutable per-attempt score row (pure INSERT, no contention). A cron flushes the ZSET into a `leaderboard_snapshot` table every 10s for durability and for RLS-governed reads. Explicitly document the leaderboard as eventually consistent.",
+   "severity": "high",
+   "layer": "db"
+  },
+  {
+   "id": "EC-HOT-02",
+   "scenario": "Coin balance stored as `students.coin_balance`; app does SELECT balance, computes new value in JS, then UPDATE.",
+   "failureMode": "Lost update / read-modify-write race. Two concurrent reward events both read 100, both write 150, and 50 coins vanish - or, in the attacker-controlled version, a student fires 20 parallel redemption requests and spends the same 100 coins 20 times. This is the single most exploitable bug in a rewards economy.",
+   "mitigation": "Never read-modify-write. Use an append-only `coin_ledger(id, student_id, delta, reason, ref_type, ref_id, created_at)` with a UNIQUE constraint on `(student_id, ref_type, ref_id)` for natural idempotency (one reward per test attempt, one per referral). Balance = `sum(delta)`, maintained as a rolled-up column updated only via `UPDATE ... SET balance = balance + $1` (atomic, single statement) inside the same transaction as the ledger insert. Redemption uses `SELECT ... FOR UPDATE` on the student row plus a `CHECK (balance >= 0)` constraint as the last line of defence. All coin mutations go through a `security definer` RPC; the `coin_ledger` and balance columns are UPDATE/INSERT-denied to `authenticated` at the GRANT level.",
+   "severity": "critical",
+   "layer": "db"
+  },
+  {
+   "id": "EC-HOT-03",
+   "scenario": "A limited giveaway with 500 seats, or a contest with 1,000 entry slots, opened to 10,000 students simultaneously.",
+   "failureMode": "Overselling. `UPDATE contests SET seats_left = seats_left - 1 WHERE id = X AND seats_left > 0` is safe, but the common pattern - check-then-insert across two statements - is not, and under READ COMMITTED thousands of transactions read `seats_left = 500` before any commits. Result: 3,000 winners for 500 prizes, a support and reputational disaster in a fee-paying student community.",
+   "mitigation": "Two correct options. (a) Single atomic statement: `WITH d AS (UPDATE contests SET seats_left = seats_left - 1 WHERE id = $1 AND seats_left > 0 RETURNING id) INSERT INTO entries ... SELECT ... FROM d` - zero seats issued if the guard fails; contention is on one row but the critical section is microseconds. (b) For high fan-in, take `pg_try_advisory_xact_lock(hashtext('contest:'||id))` which auto-releases at transaction end and returns immediately instead of queueing (https://www.postgresql.org/docs/17/explicit-locking.html), returning a friendly \"try again\" rather than holding a connection. (c) Best at 10k scale: Redis `DECR` on `seats:{contest_id}` as the admission gate (single-threaded, atomic, sub-ms), with Postgres as the durable record and a reconciliation job. Always add a UNIQUE index on `(contest_id, student_id)` so a double-tap cannot double-enter.",
+   "severity": "critical",
+   "layer": "db"
+  },
+  {
+   "id": "EC-HOT-04",
+   "scenario": "All 10,000 students' scores and all rank reads target one Redis key `lb:jee_main_mock_14`, and the Redis deployment is clustered.",
+   "failureMode": "Hot-key / hot-slot. In Redis Cluster a single key lives on exactly one shard, so horizontal scaling gives zero relief; that one node saturates on CPU and network while others idle. Large `ZRANGE` calls to render a top-1000 list are O(log N + M) and, issued 10,000 times, dominate the node's single-threaded event loop, spiking p99 for every other operation including the seat counters.",
+   "mitigation": "1) Shard writes: `lb:{contest}:{bucket}` for bucket in 0..15 chosen by `hash(student_id) % 16`; a 1Hz aggregator merges shards into `lb:{contest}:merged` via `ZUNIONSTORE`. 2) Never let clients call `ZRANGE` directly - a single worker snapshots the top-100 once per 5-10s into a string key and, separately, into Postgres; clients read the snapshot (O(1) GET) or the CDN-cached JSON. 3) Individual rank via `ZREVRANK` only, O(log N), never by scanning. 4) Use Redis replicas for all rank reads. 5) Cap leaderboard cardinality - keep only the top 5,000 with a periodic `ZREMRANGEBYRANK`.",
+   "severity": "high",
+   "layer": "infra"
+  },
+  {
+   "id": "EC-HOT-05",
+   "scenario": "Coins, streaks and contest counters are incremented in Redis for speed. The Redis node fails over (or is a non-persistent cache tier) mid-test.",
+   "failureMode": "Silent economic corruption. Redis loses the last N seconds of writes; students lose coins they saw credited, or - worse - a `DECR`-based seat counter resets to its initial value and the contest oversells. Because Redis is the source of truth for a financial-like quantity, there is no way to reconcile.",
+   "mitigation": "Strict rule: Redis is authoritative ONLY for derived, recomputable state (leaderboard ranks, caches, randomisation seeds, rate-limit counters). Anything with economic value (coin ledger, contest entries, seat allocation, giveaway winners) must be durably written to Postgres in the same logical operation, with Redis as an accelerator that can be rebuilt from Postgres by a `rebuild_leaderboard(contest_id)` job. Enable AOF `everysec` on the Redis instance regardless. Run a nightly reconciliation that recomputes every balance from `coin_ledger` and alarms on any drift.",
+   "severity": "high",
+   "layer": "db"
+  },
+  {
+   "id": "EC-LEAK-01",
+   "scenario": "`questions` table holds `stem`, `options`, `correct_option`, `solution_text`, `youtube_url` in one row. RLS allows authenticated students to SELECT the row; the app just doesn't render the answer fields during a test.",
+   "failureMode": "Total answer-key compromise. PostgREST exposes arbitrary vertical filtering - the client simply requests `/rest/v1/questions?select=id,correct_option&paper_id=eq.X` and gets all 90 answers before answering question one. RLS controls WHICH ROWS, never which columns. Client-side filtering is not a security control. One student with Charles Proxy publishes the key to a WhatsApp group; every subsequent test is worthless.",
+   "mitigation": "Column-level separation is mandatory. (a) Move `correct_option`, `solution_text`, `explanation`, `marking_scheme` into a separate `question_answers` table in a NON-exposed schema with zero GRANTs to `anon`/`authenticated`. (b) Expose questions to students only through a view or `security definer` RPC that physically cannot return answer columns. (c) Belt and braces: `REVOKE SELECT ON questions FROM authenticated; GRANT SELECT (id, stem, options, image_path, subject_id, topic_id) ON questions TO authenticated;` - Postgres column privileges cause PostgREST to 403 on any select that names a forbidden column. (d) Answers become readable only after `attempt.submitted_at IS NOT NULL` AND `paper.window_ends_at < now()`, enforced in the RPC, never in the client. See Supabase's Data API hardening guide: place tables in private schemas, revoke default privileges, expose only views/functions (https://supabase.com/docs/guides/database/hardening-data-api).",
+   "severity": "critical",
+   "layer": "db"
+  },
+  {
+   "id": "EC-LEAK-02",
+   "scenario": "A developer ships a new table (`test_answer_keys`, `admin_notes`, `coin_ledger`) via migration into the `public` schema and forgets `ALTER TABLE ... ENABLE ROW LEVEL SECURITY`.",
+   "failureMode": "Full public read/write. Supabase lint 0013 `rls_disabled_in_public` is ERROR level: \"Anyone with your project URL can read, edit, and delete all data in this table because Row-Level Security is not enabled\" (https://supabase.com/docs/guides/database/database-linter). Tables in `public` receive default privileges automatically and are exposed through the Data API without any explicit grant. The publishable/anon key is in every app bundle by design, so \"with your project URL\" means \"anyone who installed the app\".",
+   "mitigation": "1) CI gate: run `supabase db lint` (or the advisor API) on every PR and FAIL the build on any 0013/0007/0010/0015 finding. 2) Add a migration-time assertion test that asserts `relrowsecurity = true` for every table in `public` and every exposed schema, and that at least one policy exists. 3) `ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM anon, authenticated;` so a forgotten RLS enable still fails closed. 4) Prefer creating all new tables in a private `app` schema and exposing only curated views/RPCs in `api` - default-deny by construction. 5) A nightly automated probe: authenticate as a throwaway STUDENT and attempt to read every table in every exposed schema; alarm on any unexpected 200.",
+   "severity": "critical",
+   "layer": "db"
+  },
+  {
+   "id": "EC-LEAK-03",
+   "scenario": "An analytics view `v_question_performance` is created for the ADMIN dashboard and joins questions to answers. Views default to SECURITY DEFINER.",
+   "failureMode": "Complete RLS bypass. Lint 0010 `security_definer_view` is ERROR level: such a view \"runs with the privileges of the view's creator, rather than the permissions of the querying user\" (https://supabase.com/docs/guides/database/database-linter). A student queries the view via PostgREST and reads answer data that the underlying RLS would have denied. On Postgres <15 the only protection is revoking access or hiding the view in an unexposed schema (https://supabase.com/docs/guides/database/postgres/row-level-security).",
+   "mitigation": "Every view in an exposed schema must be created `WITH (security_invoker = on)` (Postgres 15+). Add a CI assertion that no view in an exposed schema has `security_invoker` off. Put all admin analytics views in a private schema with GRANTs only to a dedicated `admin_reporting` role reached through a service-role Edge Function, never directly from the app. Same discipline for SECURITY DEFINER functions: Supabase warns they \"should never be created in a schema in the 'Exposed schemas'\" unless deliberately designed as a guarded RPC with `SET search_path = ''`.",
+   "severity": "critical",
+   "layer": "db"
+  },
+  {
+   "id": "EC-LEAK-04",
+   "scenario": "ADMIN/STUDENT RBAC implemented as an RLS policy reading `auth.jwt() -> 'user_metadata' ->> 'role' = 'admin'`.",
+   "failureMode": "Trivial privilege escalation to ADMIN. Lint 0015 `rls_references_user_metadata` is ERROR level because `user_metadata` is user-writable: any student can call `supabase.auth.updateUser({ data: { role: 'admin' } })` from the app and instantly gain admin rights (https://supabase.com/docs/guides/database/database-linter). That means read/write on the entire question bank including every answer key, plus the ability to delete tests mid-window.",
+   "mitigation": "Role lives in a server-controlled place only: either `app_metadata` (writable only with the secret/service key) or, better, a `user_roles(user_id, role)` table with RLS that denies all writes to `authenticated`, read via a `security definer` `public.current_role()` helper marked STABLE and used in policies. Add the role as a custom JWT claim via a Custom Access Token auth hook so policies avoid a per-row lookup (https://supabase.com/docs/guides/auth/jwts). Write a regression test that logs in as a student, attempts `updateUser({data:{role:'admin'}})`, and asserts the student still cannot read `question_answers`.",
+   "severity": "critical",
+   "layer": "db"
+  },
+  {
+   "id": "EC-LEAK-05",
+   "scenario": "The `service_role` / `sb_secret_...` key is placed in `.env` as `EXPO_PUBLIC_SUPABASE_SERVICE_KEY` so an admin upload screen inside the same app can bypass RLS.",
+   "failureMode": "Game over. Expo inlines every `EXPO_PUBLIC_` variable into the JS bundle as plain text: \"Do not store sensitive info, such as private keys, in EXPO_PUBLIC_ variables. These variables will be visible in plain-text in your compiled application\" (https://docs.expo.dev/guides/environment-variables/). Secret keys bypass RLS entirely (https://supabase.com/docs/guides/api/api-keys). Anyone can `unzip` the APK, run `strings` on the Hermes bundle, extract the key, and dump/delete the entire question bank and every student's PII. This maps to OWASP Mobile M1 Improper Credential Usage and M7 Insufficient Binary Protections (https://owasp.org/www-project-mobile-top-10/).",
+   "mitigation": "Only the publishable/anon key (`sb_publishable_...`) may exist in the bundle - it is explicitly documented as safe for mobile apps, provided RLS is correct. ADMIN functionality authenticates as a normal user whose elevated permissions come from RLS policies keyed on the server-controlled role, OR is moved entirely to a separate admin web console / Edge Functions holding the secret key server-side. Add a pre-build CI step that greps the compiled bundle for `sb_secret_`, `service_role`, `eyJ...role\":\"service_role`. Rotate immediately via Dashboard > API Keys on any suspicion. Enable asymmetric JWT signing keys so the app never needs a shared HS256 secret.",
+   "severity": "critical",
+   "layer": "client"
+  },
+  {
+   "id": "EC-LEAK-06",
+   "scenario": "An OTA update is shipped via EAS Update to patch a scoring bug hours before a live test; the JS bundle contains a hardcoded scoring table or a debug flag such as `SHOW_ANSWERS_FOR_QA`.",
+   "failureMode": "OTA bundles are downloaded to the device and are as inspectable as the original binary - there is no encryption boundary. A determined student extracts the bundle from the app's document directory and reads any embedded constants, feature flags, endpoint paths or admin route names. Additionally, without code signing, the update channel itself is a tampering surface; EAS code signing exists precisely so \"ISPs, CDNs, cloud providers, and even EAS itself cannot tamper with updates\" (https://docs.expo.dev/eas-update/code-signing/) - but it is only available on EAS Production or Enterprise plans.",
+   "mitigation": "Treat the JS bundle as public. No answer data, no scoring rules that determine correctness, no admin secrets, no unshipped-feature flags in the bundle - scoring is server-side only. Enable EAS Update code signing (budget for the Production plan) and rotate keys on any compromise. Freeze OTA pushes during live test windows (a mid-test bundle swap can hard-crash active attempts); use a `runtimeVersion` policy and a deploy-freeze calendar. Prefer remote config fetched over authenticated HTTPS for anything that must vary, with server-side authorisation on each flag.",
+   "severity": "high",
+   "layer": "client"
+  },
+  {
+   "id": "EC-LEAK-07",
+   "scenario": "Live scores/announcements pushed over a Realtime channel that was left public, or `postgres_changes` subscribed to a table whose rows include other students' answers or the answer key.",
+   "failureMode": "Cross-tenant data exposure. Supabase documents that with `public: false` unset, \"Anyone can subscribe to that topic without authentication\" (https://supabase.com/docs/guides/realtime/broadcast). A student subscribes to `attempt:*` or the raw table stream and receives other students' answer rows in real time - or receives the answer-key row the instant an admin edits it. Realtime itself always connects to the database as Supabase Admin, so the only barrier is the channel authorisation you configure.",
+   "mitigation": "Disable public channels project-wide in Realtime Settings and instantiate every channel with `{ config: { private: true } }`. Write explicit RLS policies on `realtime.messages` scoping topic access by `auth.uid()` (topic naming convention `attempt:{attempt_id}` with a policy joining to the attempts table) (https://supabase.com/docs/guides/realtime/authorization). Never enable the publication on tables containing answers or other students' rows. Keep policies to one indexed lookup to protect join rate. Note the documented pitfall: RLS is evaluated at connect and re-evaluated only on a new JWT, so a revoked student stays connected until token expiry - keep student JWT TTL bounded and force-disconnect on ban via a server-side channel kill.",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-LEAK-08",
+   "scenario": "A signed URL for a leaked answer-key PDF or a solution video asset was issued with `expiresIn` of 1 year, or was issued before an embargo was decided.",
+   "failureMode": "Irrevocable exposure. Supabase signed URLs \"use a dedicated internal signing key separate from your project's JWT key, meaning they remain valid through auth key rotations or changes - you cannot revoke them except by contacting Supabase support\" (https://supabase.com/docs/guides/storage/serving/downloads). Rotating your API keys does nothing. The URL circulates on Telegram for the whole of its lifetime.",
+   "mitigation": "Cap `expiresIn` at the minimum viable value (test window + 2h for question images; 300s for anything answer-bearing). For truly sensitive assets do not use signed URLs at all - stream through an authenticated Edge Function that checks submission state per request. Keep an inventory of issued long-lived URLs. The documented emergency lever is that deleting the object invalidates every cached entry for that asset across all tokens - so design paths as `answers/{paper_id}/{uuid}.pdf` and be prepared to delete-and-re-upload under a new UUID as the revocation mechanism.",
+   "severity": "high",
+   "layer": "infra"
+  },
+  {
+   "id": "EC-LEAK-09",
+   "scenario": "Question images stored in a public bucket at predictable paths such as `questions/jee_main_2026_mock_14/q01.png`.",
+   "failureMode": "The entire upcoming paper is enumerable before the test starts by anyone who has seen one URL from a previous paper - no auth, no RLS, just a `for` loop. Public buckets are the right choice for CDN performance but leak completely if the namespace is guessable.",
+   "mitigation": "Randomise object paths with UUIDv4 and no semantic structure (`q/8f3a.../c19b....png`); the manifest mapping question -> path is served only by the authenticated RPC at attempt start and only for papers whose window is open. Keep DRAFT/unpublished papers in a private bucket and copy to the public bucket only at publish time. Disable bucket listing. Rotate paths per paper - never reuse an image path across papers.",
+   "severity": "high",
+   "layer": "infra"
+  },
+  {
+   "id": "EC-LEAK-10",
+   "scenario": "The randomised question order and the sectioned paper structure are computed on the client from a seed, so the client holds the full question set including sections it should not yet see.",
+   "failureMode": "Section-lock defeat. In JEE/NEET sectioned papers a student may be barred from Section B until Section A is submitted; if the client already holds all 90 questions, the lock is cosmetic. Combined with EC-LEAK-01 it also lets a student pre-plan across the whole paper. The randomisation seed being client-derived additionally lets a student compute another student's ordering.",
+   "mitigation": "Order is server-authoritative: the seed is generated server-side per `attempt_id`, stored in Postgres, cached in Redis, and never sent to the client. The RPC returns questions already permuted. Section N+1 questions are not returned until `section_n.submitted_at` is set (enforced in the RPC and in RLS on the attempt-questions view). Accept the cost: this means one extra fetch per section, ~3 fetches per attempt, not 90.",
+   "severity": "high",
+   "layer": "api"
+  },
+  {
+   "id": "EC-CHEAT-01",
+   "scenario": "Students screenshot or screen-record the paper during the live window and post it to a WhatsApp/Telegram group, where a tutor solves it and pushes answers back.",
+   "failureMode": "Live-window paper leakage. This is exactly the NEET-UG 2024 pattern at a smaller scale: the paper was photographed at 08:02, reached conspirators by 09:23 and solved answers were distributed by 10:40 on exam day (https://en.wikipedia.org/wiki/2024_NEET_controversy). For a mock-test product it destroys the integrity of percentile and AIR predictions, which is the entire value proposition.",
+   "mitigation": "Layered, not absolute. (a) `expo-screen-capture` `preventScreenCaptureAsync()` during an active attempt - hard-blocks capture on Android via FLAG_SECURE and works on iOS 11+ for recordings, iOS 13+ for screenshots (https://docs.expo.dev/versions/latest/sdk/screen-capture/). (b) `addScreenshotListener()` to log attempts server-side as a risk signal (Android <=13 needs READ_MEDIA_IMAGES; Android 14+ needs none). (c) `enableAppSwitcherProtectionAsync()` on iOS so the app-switcher snapshot is blurred. (d) Per-student visible watermark (roll number + timestamp, low-opacity, diagonal) so a leaked photo identifies its source - this is the highest-ROI control because it deters rather than blocks. (e) Accept that a second phone photographing the screen is undefeatable; do not spend engineering on it.",
+   "severity": "high",
+   "layer": "client"
+  },
+  {
+   "id": "EC-CHEAT-02",
+   "scenario": "A student shares credentials so a tutor sits the test in parallel on a second device, or the same account has two active attempt sessions.",
+   "failureMode": "Score inflation and corrupted percentile baselines; also duplicate/conflicting answer writes racing on the same `attempt_id`, producing a non-deterministic final answer sheet.",
+   "mitigation": "One active attempt per `(student_id, paper_id)` enforced by a UNIQUE partial index `WHERE submitted_at IS NULL`. Bind the attempt to a device: store a stable install ID (expo-application `getAndroidId` / iOS identifierForVendor, persisted in SecureStore) on attempt creation and reject writes from a different device ID with a 409, offering an explicit \"resume on this device\" flow that invalidates the other session. Optimistic concurrency on the answer sheet via a monotonically increasing `revision` column - a stale-revision write is rejected. Show the student an honest \"Your test is open on another device\" screen rather than silently losing answers.",
+   "severity": "high",
+   "layer": "api"
+  },
+  {
+   "id": "EC-CHEAT-03",
+   "scenario": "A test is available as an open 12-hour window rather than a fixed slot. Early takers post answers publicly; later takers score 700/720.",
+   "failureMode": "Leaderboards, percentiles and the coin economy all become garbage. This is a product-design failure, not a technical one, and no amount of client hardening fixes it.",
+   "mitigation": "For any test whose results are ranked or rewarded, use a FIXED start time and a fixed window (this is also why EC-HERD-01 exists - the thundering herd is the price of integrity). Withhold answers, solutions and YouTube links until `window_ends_at + delay`, enforced server-side in the RPC (see EC-LEAK-01). Randomise question order AND option order per student so a shared \"C, A, D, B\" sequence is useless. Draw from a pool larger than the paper (e.g. 150 questions -> 90 served) so no two students see an identical set. Publish an integrity policy and a per-paper `integrity_status` so a compromised paper can be voided and excluded from ranking.",
+   "severity": "critical",
+   "layer": "product"
+  },
+  {
+   "id": "EC-CHEAT-04",
+   "scenario": "A student answers 90 hard JEE Advanced questions correctly in 6 minutes, or shows a per-question latency distribution with near-zero variance.",
+   "failureMode": "Undetected cheating pollutes percentile calculation for the honest 9,900. If undetected it also drains the coin economy (see EC-REW-03).",
+   "mitigation": "Capture per-question timing server-side from the answer-delta stream (`question_id, first_seen_at, answered_at, revisions`). Post-hoc scoring, never real-time blocking: flag attempts where (a) median time-per-question is below the 1st percentile of the cohort AND accuracy is above the 95th, (b) inter-answer intervals have coefficient of variation < 0.15 (machine-like), (c) accuracy on questions the student never scrolled to. Route flags to an ADMIN review queue that can exclude an attempt from ranking and reverse coins. Do NOT auto-ban - false positives on genuinely fast toppers are catastrophic for trust. Publish that timing is recorded; the deterrent is worth more than the detector.",
+   "severity": "high",
+   "layer": "api"
+  },
+  {
+   "id": "EC-CHEAT-05",
+   "scenario": "App-switching detection built on React Native `AppState` to flag students who leave the app during a test.",
+   "failureMode": "High false-positive rate makes the feature hostile. On iOS the `inactive` state fires for incoming calls, Control Center, the multitasking view and even notification banners; on Android `blur` fires for the notification drawer (https://reactnative.dev/docs/appstate). An Indian student on a shared phone receiving a call is indistinguishable from a cheater. Auto-terminating the attempt on background loses a 3-hour effort and generates refund demands.",
+   "mitigation": "Record, do not punish: log `{event, timestamp, duration}` transitions as evidence, never auto-submit. Distinguish `inactive` (transient, ignore) from `background` with duration > 20s (record). Show a non-blocking in-app notice \"You left the test for 45s - this is recorded\" so behaviour is self-correcting. Surface the count in the ADMIN review queue alongside timing anomalies. Only for a formally proctored, explicitly consented paid exam should backgrounding hard-fail the attempt, and then only after an on-screen pre-test agreement.",
+   "severity": "medium",
+   "layer": "client"
+  },
+  {
+   "id": "EC-CHEAT-06",
+   "scenario": "A cheater runs the app on a rooted device with Frida/Xposed to hook the network layer, or on an emulator farm to script attempts.",
+   "failureMode": "Hooked clients can strip watermarks, defeat FLAG_SECURE, read the in-memory question set including any cached answer data, and replay/forge API calls. Emulator farms enable industrial-scale reward farming (EC-REW-01).",
+   "mitigation": "Server-side attestation, not client-side checks. Android: Play Integrity `deviceIntegrity` (MEETS_DEVICE_INTEGRITY / MEETS_STRONG_INTEGRITY) + `appIntegrity`, verified on YOUR server, requested close in time to the defended action, with `requestHash` to prevent replay; note the default quota is 10,000 requests/day across all installs and must be raised via Play Console before a 10k-student event (https://developer.android.com/google/play/integrity/overview). iOS: App Attest attestation once per install, assertions per sensitive call, verified server-side (https://developer.apple.com/documentation/devicecheck/establishing-your-app-s-integrity). Tiered enforcement: fail-open to \"practice mode\" for unattested devices, but exclude them from ranked papers and coin rewards. Accept the documented limit that client-side root/emulator detection only \"raises the bar out of reach of opportunist and automatic attackers\" and can be removed by a skilled attacker (https://github.com/javiersantos/PiracyChecker). Do not block honest students on older/custom-ROM devices - offer an appeals path.",
+   "severity": "medium",
+   "layer": "client"
+  },
+  {
+   "id": "EC-CHEAT-07",
+   "scenario": "An attacker extracts the publishable key from the bundle and drives the REST API directly with a script - enumerating the question bank, mass-creating attempts, or brute-forcing answers by submitting and reading the score.",
+   "failureMode": "Even with perfect RLS, an authenticated student can hammer legitimate endpoints: submit attempt, read score, resubmit - an oracle that reveals the answer key in ~4 iterations per MCQ. Also `/rest/v1/questions?limit=100000` scrapes the entire bank one page at a time, which is the product's core IP.",
+   "mitigation": "1) One graded attempt per (student, paper) - a resubmit does not regrade and does not reveal per-question correctness until the window closes. 2) Never return per-question correctness in the submit response. 3) PostgREST `db-max-rows` / explicit `LIMIT` in every exposed view; deny unbounded selects on `questions` by exposing only an RPC that requires a valid open `attempt_id`. 4) Per-user token-bucket rate limiting in a PostgREST pre-request function, which Supabase documents as the hook for \"rate limiting, validate custom API keys, check quotas\" (https://supabase.com/docs/guides/database/hardening-data-api), backed by Redis counters. 5) Cloudflare WAF + bot management in front of the Supabase domain with a custom rule on request rate per JWT `sub`. 6) Alarm on any single account reading > 500 distinct question rows/hour.",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-REW-01",
+   "scenario": "Welcome bonus of 100 coins plus daily-streak coins; a farmer scripts 2,000 accounts on an emulator farm with rotating +91 virtual numbers.",
+   "failureMode": "200,000 coins minted from nothing, draining the giveaway/prize budget and making genuine top students unable to win anything. Also inflates MAU billing ($0.00325/MAU over 100k on Pro - https://supabase.com/pricing) and pollutes every cohort statistic.",
+   "mitigation": "Make coins expensive to mint and cheap to hold. (a) No welcome bonus at all, or a bonus that is non-redeemable until 7 days + 1 graded full-length test + verified +91 mobile. (b) Device-level dedupe: hash (Play Integrity device signals / App Attest key ID) and cap N accounts per device lineage; Play Integrity `deviceRecall` (beta) survives reinstall and factory reset. (c) Velocity rules: >5 signups per /24 subnet per hour, >3 per device, identical device model+OS+screen -> shadow-flag the cohort and hold rewards for review rather than blocking signup. (d) Cap total coins mintable per paper per day globally so a farm cannot exceed a bounded budget even if undetected. (e) Reconcile the ledger nightly and alarm on daily mint > 2x trailing median.",
+   "severity": "high",
+   "layer": "product"
+  },
+  {
+   "id": "EC-REW-02",
+   "scenario": "Referral programme pays the referrer 200 coins on the referee's first completed test. A student refers themselves 40 times with alt accounts.",
+   "failureMode": "Self-referral is the single most farmed mechanic in Indian ed-tech reward programmes. Uncapped, it converts directly into cash-equivalent giveaway entries.",
+   "mitigation": "UNIQUE constraint on `(referee_id)` in `referrals` so a referee can only ever be credited once, plus a hard rule that referrer != referee and that referrer's device/IP lineage != referee's at signup time. Delay the payout: credit on the referee's 7th active day, not on signup, so the farmer must maintain 40 accounts for a week. Cap referrals per referrer per month (e.g. 10) and per lifetime (e.g. 50). Reward the referee more than the referrer (aligns with genuine word-of-mouth, kills farming economics). Full audit trail: `referrals(referrer_id, referee_id, signup_ip_hash, device_hash, credited_at, ledger_entry_id)` with the ledger entry UNIQUE-keyed to the referral id so a retry cannot double-credit.",
+   "severity": "high",
+   "layer": "product"
+  },
+  {
+   "id": "EC-REW-03",
+   "scenario": "Coins awarded per completed test. A student replays the same easy 10-question topic quiz 400 times in an evening, or scripts it via the API.",
+   "failureMode": "Unbounded coin minting from a legitimate-looking action. Also generates 400x write amplification on attempts/answers tables from a single user, and pollutes the mastery model.",
+   "mitigation": "Coins are awarded on FIRST completion of a given paper only - enforced by the `UNIQUE (student_id, ref_type='attempt_reward', ref_id=paper_id)` constraint on `coin_ledger` (EC-HOT-02), so replays are naturally non-paying rather than needing detection. Scale reward by difficulty and by percentile, not by count. Global daily coin cap per student (e.g. 300). Rate-limit attempt creation to e.g. 20/day/student. Award for streaks and improvement, which are inherently non-farmable, rather than for volume.",
+   "severity": "medium",
+   "layer": "product"
+  },
+  {
+   "id": "EC-REW-04",
+   "scenario": "A student taps \"Redeem 500 coins\" and the request times out; the app auto-retries 3 times. Or an attacker fires 20 parallel redemption requests deliberately.",
+   "failureMode": "Double-spend / multiple prize grants for one balance. Classic non-idempotent mutation under retry - the exact failure Stripe's idempotency-key design exists to prevent. Because coins have real value (giveaway entries), this is a financial bug.",
+   "mitigation": "Client generates a UUID `idempotency_key` per user intent (once, before the first attempt, persisted) and sends it on every retry. Server RPC does `INSERT INTO redemptions(idempotency_key, ...) ON CONFLICT (idempotency_key) DO NOTHING RETURNING *`; if no row is returned, re-read and return the original result. The debit and the redemption row are in one transaction, with `SELECT ... FOR UPDATE` on the balance row and a `CHECK (balance >= 0)` constraint. Retain keys for 24h minimum. Never expose an UPDATE grant on balances to `authenticated`.",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-DATA-01",
+   "scenario": "A refactor changes an RLS policy on `attempts` from `student_id = auth.uid()` to a join through a `batches` table; it passes review and ships on a Friday.",
+   "failureMode": "Either (a) students can now read each other's attempts and answers - a silent, undetected breach that only surfaces when a student notices, or (b) the policy is too tight and 10,000 students see an empty test at 10:00:01. RLS regressions are invisible in normal QA because developers test with a service-role or admin session.",
+   "mitigation": "1) pgTAP (or plain SQL) policy tests in CI that run as at least four personas - anon, student A, student B, admin - and assert exact row counts and column visibility for every exposed object, including the negative cases (\"student A must get 0 rows from student B's attempts\", \"student must get 403 on select=correct_option\"). 2) Every migration touching a policy requires a paired test change. 3) Deploy to a staging project with a production-shaped data snapshot and run the persona suite before promoting. 4) Freeze all schema/policy deploys during live test windows. 5) Post-deploy synthetic canary that authenticates as a real throwaway student every 60s and asserts it can read its own attempt and cannot read a foreign one; page on failure.",
+   "severity": "critical",
+   "layer": "db"
+  },
+  {
+   "id": "EC-DATA-02",
+   "scenario": "A migration runs at 10:30 during a live test: `ALTER TABLE attempts ADD COLUMN proctor_flags jsonb NOT NULL DEFAULT '{}'` or `CREATE INDEX ON answers(question_id)`.",
+   "failureMode": "ACCESS EXCLUSIVE lock on the hottest table in the system. A non-concurrent `CREATE INDEX` blocks all writes; adding a NOT NULL constraint locks the table during validation; changing a column type forces a full rewrite (https://github.com/ankane/strong_migrations). With 10,000 attempts writing answer deltas, the lock queue backs up behind the DDL, every subsequent query queues behind THAT, and the pool is exhausted within seconds. Every student loses their in-flight answers.",
+   "mitigation": "1) Hard deploy freeze during any live test window, enforced by CI (fail the deploy job if a row exists in `scheduled_tests` with `now() BETWEEN window_starts_at - 30min AND window_ends_at + 30min`). 2) `SET lock_timeout = '5s'` and `SET statement_timeout` at the top of every migration so a migration fails fast instead of freezing production (strong_migrations recommends lock_timeout 10s / statement_timeout 1h). 3) Only expand-migrate-contract: add nullable column -> backfill in batches outside a transaction -> add NOT NULL as a NOT VALID check constraint then VALIDATE separately. 4) `CREATE INDEX CONCURRENTLY` always, with `disable_ddl_transaction`. 5) Never rename or retype a column in a live schema - add new, dual-write, migrate, drop later.",
+   "severity": "critical",
+   "layer": "db"
+  },
+  {
+   "id": "EC-DATA-03",
+   "scenario": "A bad UPDATE (missing WHERE) or a corrupt bulk import destroys `answers` for a live 10,000-student test. The team decides to restore.",
+   "failureMode": "Restoring loses data and takes the project offline. PITR gives a worst-case RPO of 2 minutes because WAL is backed up at 2-minute intervals, and \"the project becomes inaccessible during restoration\" with downtime proportional to database size - Supabase does not publish an RTO number (https://supabase.com/docs/guides/platform/backups). Free tier has no PITR at all; Pro daily backups retain only 7 days. Restoring the whole project to fix one table means discarding every legitimate write made since the incident, i.e. 10,000 students' in-flight tests.",
+   "mitigation": "1) Enable PITR (Pro add-on, ~$100/mo for 7-day, ~$200 for 14-day, ~$400 for 28-day retention) before launch; Supabase's prod checklist recommends it above 4 GB. 2) Never restore the whole project for a single-table incident - instead restore to a NEW project at the target timestamp, then selectively copy the damaged table back via COPY/postgres_fdw. Rehearse this and record the measured RTO for your actual data size; do not assume. 3) Independent logical backups: nightly `pg_dump` of the question bank + answer keys to a separate GCS bucket with object versioning and a different credential domain, so a compromised Supabase account cannot destroy backups. 4) Make destructive access hard: no direct psql to prod for application engineers; all bulk writes through reviewed migrations or an admin RPC with a dry-run mode and row-count assertion.",
+   "severity": "critical",
+   "layer": "db"
+  },
+  {
+   "id": "EC-DATA-04",
+   "scenario": "A student on patchy 4G loses connectivity for 25 minutes mid-test, or the app is killed by Android's low-memory killer at question 62.",
+   "failureMode": "Total loss of 2 hours of work if answers are only held in React state and flushed at submit. This is the most common real-world support complaint for exam apps in India, where connectivity is the norm-breaking variable, and it directly causes uninstalls and refund demands.",
+   "mitigation": "Offline-first attempt state. Every answer selection writes synchronously to MMKV/SQLite keyed by `attempt_id`, plus a monotonically increasing local `revision`. A background sync flushes deltas every 30-60s (batched with the heartbeat, EC-HERD-07) and retries with jitter. On relaunch the app rehydrates from local storage and reconciles with the server by taking `max(revision)` per question. The server timer keeps running (the student loses time, which is correct and must be stated clearly in the UI). Because all 90 questions and images were prefetched at admission (EC-HERD-03), a student can complete an entire paper fully offline and sync at the end - design for this explicitly.",
+   "severity": "critical",
+   "layer": "client"
+  },
+  {
+   "id": "EC-COST-01",
+   "scenario": "Question images are 800 KB PNGs of LaTeX-rendered problems, served without CDN caching (see EC-LEAK-02 signed-URL pathology), across 12 mock tests a month.",
+   "failureMode": "Egress blowout. 90 images x 800 KB = 72 MB per paper per student. 10,000 students x 12 tests = 8.6 TB/month of origin egress. Pro includes 250 GB, overage is $0.09/GB (https://supabase.com/pricing) -> ~8,350 GB over -> ~$750/month from images alone, on top of a $25 plan. Cache-busting signed URLs make CDN hit rate ~0%, so none of it is absorbed at the edge.",
+   "mitigation": "1) Fix the caching pathology first (EC-LEAK-02 / EC-HERD-03) - a 99% edge hit rate turns 8.6 TB of origin egress into ~90 GB. 2) Prefer rich-text + client-side LaTeX rendering (KaTeX in a WebView or react-native-mathjax) over images wherever the admin authoring flow allows; a LaTeX string is ~1 KB vs 800 KB, a 3-order-of-magnitude reduction. 3) Where images are unavoidable, enforce WebP/AVIF at upload with a max dimension of 1200px and a 150 KB budget, rejecting oversized uploads in the admin RPC (Storage global file size limit is configurable per plan up to 500 GB on Pro/Team - https://supabase.com/docs/guides/storage/uploads/file-limits, so the platform will NOT stop an admin from uploading a 20 MB scan). 4) Put Cloudflare in front and serve images from a Cloudflare-cached hostname so egress is billed at Cloudflare's (zero, on standard plans) rather than Supabase's $0.09/GB. 5) Alarm on daily egress > 2x trailing median.",
+   "severity": "high",
+   "layer": "infra"
+  },
+  {
+   "id": "EC-COST-02",
+   "scenario": "An Edge Function that grades a submission calls another Edge Function (or itself) on failure, and a malformed payload makes it fail deterministically. Or a webhook retries forever on a 500.",
+   "failureMode": "Runaway invocation loop. Supabase documents roughly 5,000 requests/minute for recursive function calls (https://supabase.com/docs/guides/functions/limits); Pro/Team include 2M invocations with overage at $2 per additional million (https://supabase.com/pricing). A loop at 5,000/min generates 7.2M invocations/day -> ~$14/day and rising, and saturates the function runtime so legitimate grading fails. Combined with the 400s wall-clock and 2s CPU limits, a stuck function also holds capacity.",
+   "mitigation": "1) No function may invoke itself or another function without a decrementing `x-retry-depth` header, hard-capped at 3. 2) Move all retryable work to pgmq with a bounded `read_ct` - archive to a dead-letter queue after 5 reads rather than retrying forever (https://github.com/pgmq/pgmq). 3) Poison-message handling: any payload that fails twice with the same error goes to DLQ, never back to the main queue. 4) Circuit breaker on external calls with a token-bucket retry budget. 5) Billing alerts + Pro spend cap left ON as a hard backstop, with the understanding that hitting the cap degrades service - so alarm well before it. 6) Per-function invocation-rate dashboards with a page at 3x baseline.",
+   "severity": "high",
+   "layer": "infra"
+  },
+  {
+   "id": "EC-COST-03",
+   "scenario": "An admin analytics screen runs an unbounded aggregate (`SELECT ... GROUP BY topic` over 90M answer rows) at 10:15 while a test is live, or a student-facing \"all India rank\" query does a full sort per request.",
+   "failureMode": "One expensive query consumes the shared CPU and IO budget of the compute instance; effective IOPS is the lower of what the compute size supports and what the disk is provisioned for (https://supabase.com/docs/guides/platform/compute-and-disk). Every student request queues behind it. Supabase's own read-replica guidance treats sustained CPU > 70% as the threshold for structural change (https://supabase.com/docs/guides/platform/read-replicas).",
+   "mitigation": "1) Separate roles and separate budgets: `statement_timeout = 5s` for `authenticated`, `30s` for the admin reporting role, `2s` for `anon`. 2) Route all ADMIN analytics to a read replica (note the documented limitation: Auth, Storage and Realtime cannot use replicas), or to a nightly-refreshed materialised view / BigQuery export on GCP - never live aggregates over the answers table. 3) Pre-compute ranks and percentiles at grading time (EC-HERD-08) so student-facing rank is an indexed point lookup. 4) `pg_stat_statements` review in every sprint; alarm on any statement whose total_exec_time enters the top 5. 5) Block admin analytics entirely during live test windows via a feature flag.",
+   "severity": "high",
+   "layer": "db"
+  }
+ ],
+ "sources": [
+  "https://supabase.com/docs/guides/auth/rate-limits",
+  "https://supabase.com/docs/guides/database/postgres/row-level-security",
+  "https://supabase.com/docs/guides/database/connection-management",
+  "https://supabase.com/docs/guides/functions/limits",
+  "https://supabase.com/docs/guides/realtime/quotas",
+  "https://supabase.com/docs/guides/realtime/authorization",
+  "https://supabase.com/docs/guides/realtime/postgres-changes",
+  "https://supabase.com/docs/guides/realtime/broadcast",
+  "https://supabase.com/docs/guides/platform/backups",
+  "https://supabase.com/docs/guides/platform/going-into-prod",
+  "https://supabase.com/docs/guides/platform/read-replicas",
+  "https://supabase.com/docs/guides/platform/compute-and-disk",
+  "https://supabase.com/docs/guides/database/database-linter",
+  "https://supabase.com/docs/guides/database/hardening-data-api",
+  "https://supabase.com/docs/guides/api/api-keys",
+  "https://supabase.com/docs/guides/auth/jwts",
+  "https://supabase.com/docs/guides/auth/auth-captcha",
+  "https://supabase.com/docs/guides/auth/auth-anonymous",
+  "https://supabase.com/docs/guides/storage/serving/downloads",
+  "https://supabase.com/docs/guides/storage/cdn/smart-cdn",
+  "https://supabase.com/docs/guides/storage/uploads/file-limits",
+  "https://supabase.com/docs/guides/queues",
+  "https://supabase.com/pricing",
+  "https://github.com/pgmq/pgmq",
+  "https://www.postgresql.org/docs/17/explicit-locking.html",
+  "https://github.com/ankane/strong_migrations",
+  "https://redis.io/docs/latest/develop/data-types/sorted-sets/",
+  "https://redis.io/learn/howtos/solutions/microservices/caching",
+  "https://aws.amazon.com/builders-library/caching-challenges-and-strategies/",
+  "https://builder.aws.com/content/3EumjoZascWd1oZiEgL8ORlv3qE/timeouts-retries-and-backoff-with-jitter",
+  "https://developers.cloudflare.com/cache/how-to/tiered-cache/",
+  "https://developers.cloudflare.com/turnstile/",
+  "https://docs.expo.dev/guides/environment-variables/",
+  "https://docs.expo.dev/eas-update/code-signing/",
+  "https://docs.expo.dev/versions/latest/sdk/screen-capture/",
+  "https://reactnative.dev/docs/appstate",
+  "https://developer.android.com/google/play/integrity/overview",
+  "https://developer.apple.com/documentation/devicecheck/establishing-your-app-s-integrity",
+  "https://github.com/javiersantos/PiracyChecker",
+  "https://owasp.org/www-project-mobile-top-10/",
+  "https://cheatsheetseries.owasp.org/cheatsheets/Denial_of_Service_Cheat_Sheet.html",
+  "https://en.wikipedia.org/wiki/2024_NEET_controversy",
+  "https://www.twilio.com/en-us/sms/pricing/in"
+ ]
+}

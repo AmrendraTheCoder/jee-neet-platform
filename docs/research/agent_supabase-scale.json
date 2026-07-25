@@ -1,0 +1,299 @@
+{
+ "summary": "Supabase can serve 10k+ concurrent JEE/NEET test-takers, but only if the architecture respects four hard constraints. (1) RLS is the dominant performance risk: Supabase's own troubleshooting doc shows unwrapped auth.uid() and unindexed policy columns taking policies from <0.1ms to 171ms/11,000ms/178,000ms; the fixes (wrap every function call in a scalar SELECT so the planner hoists it into an InitPlan, index every RLS predicate column and FK, add `TO authenticated`, push joins into SECURITY DEFINER helpers, and duplicate the RLS filter in the client query) are free and mandatory. (2) RBAC must live in a custom_access_token_hook writing a role claim into the JWT, never in user_metadata \u2014 Supabase's own `splinter` lint 0015 classifies RLS referencing user_metadata as ERROR because any client can call updateUser({data:{is_admin:true}}); app_metadata/JWT claims via the hook plus a server-owned user_roles table is the supported pattern. (3) Connection math is misunderstood: mobile clients hitting PostgREST/GoTrue over HTTPS do NOT consume one Postgres connection each (PostgREST owns a small internal pool), so a 4XL (16 vCPU / 64 GB / 480 direct connections / 3,000 pooler clients, ~$960/mo) is ample headroom for 10k concurrent exam-takers; only your own Cloud Run/Edge workers need Supavisor transaction mode on port 6543, which does not support prepared statements. (4) Realtime postgres_changes is the wrong primitive for leaderboards \u2014 it is single-threaded and caps near 4,000 msgs/sec with RLS, while Broadcast benchmarks at 224k msgs/sec across 32k clients; and Pro's default 500 peak connections must be raised (spend-cap off \u2192 10,000; $10 per 1,000 peak connections). For exam data, use one narrow row per answer in a monthly/exam-range-partitioned table with BRIN on the timestamp, ON CONFLICT on a (attempt_id, question_id) idempotency key, batched 10\u201330s client syncs, READ COMMITTED with advisory locks for scoring rather than SERIALIZABLE. Storage cost is a non-issue (~180M answer rows \u2248 25\u201335 GB \u2248 $4/mo at $0.125/GB); egress ($0.09/GB uncached, $0.03/GB cached, 250 GB included on Pro) and question-image delivery are the real variable costs, and Smart CDN + image transformations ($5 per 1,000 origin images beyond 100) handle those. GCP's role should be narrow and deliberate: Supabase is AWS-only (India = ap-south-1 Mumbai), so put GCP pieces in asia-south1 (Tier 1 Cloud Run pricing) and accept cross-cloud egress on both sides \u2014 FCM for push (mandatory for RN/Expo Android anyway), Cloud Run + Cloud Tasks (500 dispatches/sec/queue, 5,000 concurrent, $0.40/M ops) for async scoring, BigQuery ($6.25/TiB scanned, $0.02/GB active storage) for analytics. Self-hosting Supabase on GCP is not worth it below roughly $500\u20131,000/mo of managed compute spend.",
+ "findings": [
+  {
+   "title": "Supabase's official RLS performance doc: six concrete fixes with measured deltas",
+   "detail": "supabase.com/docs/guides/troubleshooting/rls-performance-and-best-practices-Z5Jjwv lists, with benchmark numbers: (1) index RLS columns \u2014 `create index userid on test_table using btree (user_id)` \u2192 171ms to <0.1ms on 100k rows, 'over 100x'; (2) wrap functions in SELECT \u2014 `(select auth.uid()) = user_id` and `(select is_admin())` \u2192 11,000ms to 10ms, and 178,000ms to 12ms; (3) add the same filter in the application query (.eq('user_id', userId)) \u2192 171ms to 9ms; (4) wrap join-table lookups in SECURITY DEFINER functions \u2192 178,000ms to 12ms; (5) restructure joins as `team_id in (select team_id from team_user where user_id = auth.uid())` rather than `auth.uid() in (...)` \u2192 9,000ms to 20ms; (6) specify `TO authenticated` on the policy \u2192 170ms to <0.1ms. A 1M-row team-lookup policy went from >2 minutes to 2ms.",
+   "implication": "Every policy on questions, attempts, responses, notes must be written in this exact shape from day one. Codify it as a migration lint: no bare auth.uid()/auth.jwt()/custom function in USING/WITH CHECK, every policy names TO authenticated or TO anon, every column referenced in a policy carries a btree index, and every FK is explicitly indexed (Postgres does not auto-index FKs).",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/troubleshooting/rls-performance-and-best-practices-Z5Jjwv"
+  },
+  {
+   "title": "Why the SELECT-wrap works: InitPlan hoisting, not caching",
+   "detail": "Postgres treats `(select auth.uid())` as an uncorrelated scalar subquery and hoists it into an InitPlan executed exactly once per query; every row check then compares against a literal. A bare auth.uid() in the policy is re-evaluated per row (100,000 invocations on a 100k-row scan). The same applies to any STABLE helper function. Only valid when the function's result does not depend on the row being checked.",
+   "implication": "Applies to your authorize()/has_exam_access() helpers too. Declare helpers STABLE (not VOLATILE) and always call them as (select fn(...)) inside policies. VOLATILE functions cannot be hoisted and will be called per row.",
+   "confidence": "high",
+   "source": "https://dev.to/arvavit/76-rls-policies-rewritten-in-one-migration-the-authuid-init-plan-trap-in-supabase-4hg"
+  },
+  {
+   "title": "user_metadata in RLS is an ERROR-level security lint \u2014 the privilege-escalation trap",
+   "detail": "Supabase's `splinter` database advisor rule 0015_rls_references_user_metadata is level ERROR: 'Supabase Auth user_metadata is used to set metadata about the user on sign up. It is designed to be manipulated by the user themselves.' An authenticated client can call `supabase.auth.updateUser({ data: { is_admin: true } })`. raw_user_meta_data is user-writable via auth.update(); raw_app_meta_data is NOT user-writable and is the correct place for authorization data. Remediation per Supabase: 'There is no one-size-fits-all solution' \u2014 use immutable attributes or a server-controlled permissions table.",
+   "implication": "Never store the ADMIN/STUDENT role in user_metadata. Store it in a public.user_roles table owned by the service role, project it into the JWT via the custom access token hook, and read it as auth.jwt() ->> 'user_role'. Run the Supabase Security Advisor in CI and fail the build on lint 0015.",
+   "confidence": "high",
+   "source": "https://supabase.github.io/splinter/0015_rls_references_user_metadata/"
+  },
+  {
+   "title": "Supabase's canonical RBAC pattern: custom_access_token_hook + user_roles + role_permissions + authorize()",
+   "detail": "Official pattern: enums `app_role` and `app_permission`; tables public.user_roles(user_id uuid references auth.users, role app_role, unique(user_id, role)) and public.role_permissions(role, permission, unique(role,permission)); a `custom_access_token_hook(event jsonb) returns jsonb language plpgsql stable` that does `claims := jsonb_set(claims,'{user_role}',to_jsonb(user_role))`. Critical grants: `grant usage on schema public to supabase_auth_admin; grant execute on function public.custom_access_token_hook to supabase_auth_admin; revoke execute ... from authenticated, anon, public; grant all on table public.user_roles to supabase_auth_admin; revoke all on table public.user_roles from authenticated, anon, public;` plus a policy `for select to supabase_auth_admin using (true)`. The authorize() helper is `language plpgsql stable security definer set search_path = ''` and policies call it as `using ( (SELECT authorize('channels.delete')) )`.",
+   "implication": "Map directly: app_role = ('admin','student'); app_permission = ('questions.write','tests.publish','analytics.read','attempts.grade', ...). Note `set search_path = ''` on every SECURITY DEFINER function \u2014 omitting it is a search-path hijack vulnerability. Claim only appears in NEW tokens, so a role change requires a token refresh (default access token TTL 3600s) or an explicit refreshSession() call.",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/database/postgres/custom-claims-and-role-based-access-control-rbac"
+  },
+  {
+   "title": "Compute tier table: connections, IOPS and price per tier (2026)",
+   "detail": "Nano 0.5GB/60 direct/200 pooler/$0; Micro 1GB/60/200/~$10; Small 2GB/90/400/~$15; Medium 4GB/120/600/~$60; Large 8GB (2 dedicated cores)/160/800/~$110; XL 16GB (4 cores)/240/1,000/~$210; 2XL 32GB (8 cores)/380/1,500/~$410; 4XL 64GB (16 cores)/480/3,000/~$960; 8XL 128GB (32 cores)/490/6,000/~$1,870; 12XL 192GB/500/9,000/~$2,800; 16XL 256GB/500/12,000/~$3,730. Baseline IOPS scale 250 (Nano) \u2192 80,000 (16XL); baseline disk throughput 5 MB/s \u2192 2,375 MB/s. Max direct connections plateau at ~500 above 8XL \u2014 vertical scaling buys RAM/CPU/IOPS, not connections.",
+   "implication": "For 10k concurrent exam-takers on the Data API, 2XL (~$410/mo) is the realistic floor and 4XL (~$960/mo) is the safe target for a peak test window; you can schedule the upgrade for the exam window and scale back down. Because connection count plateaus at 500 direct, do NOT plan an architecture that needs one DB connection per student.",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/platform/compute-and-disk"
+  },
+  {
+   "title": "PostgREST/GoTrue do not consume one Postgres connection per mobile client",
+   "detail": "Mobile clients talk HTTPS to PostgREST (Data API), GoTrue (Auth), Storage and Realtime \u2014 these are stateless HTTP services that maintain their own small internal pools to Postgres. Supavisor's per-tier 'pooler client connections' quota (1,500 at 2XL, 3,000 at 4XL) applies to raw Postgres wire-protocol clients (your Cloud Run workers, admin tooling, ETL), not to REST users. Supavisor transaction mode (port 6543) proxies many client connections onto a smaller pool of server connections and closes idle server connections after 5 minutes; session mode (port 5432) pins one backend per client for the whole session and can queue clients for up to a minute. Pool Size is a single setting shared across both ports; running Supavisor and the dedicated PgBouncer simultaneously with pool size 30 can produce up to 60 backend connections.",
+   "implication": "Route 100% of student traffic through the Data API / Edge Functions, not through direct Postgres. Reserve Supavisor transaction mode (6543) for Cloud Run scoring workers and set their client-side pool small (e.g. 2\u20135 per instance x max instances <= pool size). This is the single biggest lever that makes 10k concurrent affordable.",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/database/connecting-to-postgres"
+  },
+  {
+   "title": "Transaction mode breaks prepared statements \u2014 a silent ORM/driver failure",
+   "detail": "Supabase docs: 'Transaction mode does not support prepared statements. To avoid errors, turn off prepared statements for your connection library.' Concretely: node-postgres is fine by default; Prisma requires `?pgbouncer=true` (and `statement_cache_size=0` for some drivers); asyncpg requires `statement_cache_size=0`; JDBC requires `prepareThreshold=0`. Session mode (5432) does support prepared statements. Direct connections and the dedicated pooler are IPv6 by default (IPv4 needs a paid add-on); the shared Supavisor pooler is IPv4-only on all tiers.",
+   "implication": "If any GCP-side worker uses Prisma/asyncpg against port 6543 without disabling prepared statements you get intermittent 'prepared statement \"s0\" already exists' errors that only appear under concurrency \u2014 i.e. exactly during the exam. Bake the flag into the connection string and load-test at concurrency > pool size.",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/database/connecting-to-postgres"
+  },
+  {
+   "title": "Supavisor scale ceiling is not your bottleneck",
+   "detail": "Supabase's Supavisor benchmark: 1,003,200 simultaneous client connections across two 64-core nodes; 250,000 on a single 16-core ARM node; 20,000 QPS sustained with 400 direct DB connections in the pool. Latency at 5,000 QPS: median 2ms / p95 3ms / p99 23ms. At 20,000 QPS: median 18.4ms / p95 46.9ms / p99 68ms. Supavisor adds ~2\u20133ms per query versus PgBouncer. (Benchmark published 2023-08-11 \u2014 older source, but Supavisor is still the shipped pooler in 2026.)",
+   "implication": "Budget ~2\u20135ms of pooler overhead on every query from GCP workers. If your scoring path does 10 round-trips per attempt, that's 20\u201350ms of pure pooler tax \u2014 collapse scoring into a single PL/pgSQL function call or a single batched statement.",
+   "confidence": "medium",
+   "source": "https://supabase.com/blog/supavisor-1-million"
+  },
+  {
+   "title": "Realtime: postgres_changes is single-threaded and caps ~4,000 msgs/sec with RLS; Broadcast is 50x faster",
+   "detail": "Supabase Realtime benchmarks: WebSocket Broadcast \u2014 32,000 concurrent users, 224,000 msgs/sec, 64,000 channel joins, median 6ms / p95 28ms / p99 213ms. Database Broadcast \u2014 80,000 users, 10,000 msgs/sec, median 46ms / p95 132ms / p99 159ms. Broadcast with RLS auth \u2014 50,000 users, >150,000 msgs/sec, median 19ms. Large scale \u2014 250,000 users, >800,000 msgs/sec. But Postgres Changes: 'Database changes are processed on a single thread to maintain the change order'; a Large\u219216XL DB supports up to 200,000 clients at only 0.05 changes/sec without RLS, and RLS configurations 'max out around 4,000 total messages/second'.",
+   "implication": "Never build the live leaderboard or 'students currently in exam' counter on postgres_changes. Use Broadcast (preferably Broadcast-from-Database triggers with an explicit topic per test) or, better, compute leaderboards in Redis and push periodic Broadcast snapshots every 5\u201310s. Reserve postgres_changes for low-frequency admin views only.",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/realtime/benchmarks"
+  },
+  {
+   "title": "Realtime quotas will block a 10k-concurrent test on default Pro settings",
+   "detail": "Concurrent peak connections: Free 200, Pro 500, Pro with spend cap DISABLED 10,000, Team 10,000, Enterprise 10,000+. Messages/sec and channel joins/sec: Free 100, Pro 500, Pro no-spend-cap 2,500, Team 2,500. Channels per client: 100. Max payload: Broadcast 256 KB Free / 3,000 KB Pro+; postgres_changes 1,024 KB. Refusal errors are `too_many_channels`, `too_many_connections`, `too_many_joins`. Billing: peak connections quota 500 on Pro/Team, overage $10 per 1,000 peak connections; Realtime messages 5M included on Pro/Team, overage $2.50 per 1M messages.",
+   "implication": "Turning off the spend cap is a hard prerequisite before any 10k-student mock test \u2014 otherwise you are capped at 500 concurrent sockets and 500 joins/sec, and 10,000 students all joining in the first 60 seconds of a scheduled test will trip too_many_joins. Even at 10,000 the joins/sec limit of 2,500 means you must stagger channel joins with client-side jitter. Cost at 10k peak: ~$95/mo of peak-connection overage.",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/realtime/quotas"
+  },
+  {
+   "title": "Edge Functions hard limits: 256 MB memory, 2s CPU time, 400s wall clock",
+   "detail": "Max memory 256 MB. Max CPU time 2s per request (actual on-CPU time; async I/O excluded). Wall clock: 150s Free, 400s paid. Request idle timeout 150s \u2192 504. Max function size 20 MB (CLI-bundled) / 5 MB (server-bundled). Functions per project: Free 100, Pro 500, Team 1000. Log message max 10,000 chars; log threshold 100 events per 10s. Cold starts improved dramatically in July 2025: average 870ms \u2192 42ms, p95 8,502ms \u2192 86ms, p99 15,069ms \u2192 460ms, worst case 24,300ms \u2192 1,630ms; 'spikes > 1s' fell from 47% to 4%.",
+   "implication": "2s CPU time rules out scoring a 180-question paper with heavy per-question logic in an Edge Function if it involves CPU-bound work; it is fine for I/O-bound orchestration. Put bulk scoring in a Postgres function (no CPU limit beyond statement_timeout) or on Cloud Run (60-min timeout). p99 cold start of 460ms is still visible on a 'submit test' tap \u2014 keep the submit path on the Data API (a single RPC) rather than an Edge Function.",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/functions/limits"
+  },
+  {
+   "title": "Auth rate limits will throttle a 10k-signup burst \u2014 several are NOT configurable",
+   "detail": "Built-in email provider: 2 emails per hour, project-wide (only lifted with custom SMTP). OTP sends project-wide: 30/hour default (configurable). Per-user OTP/magic-link/signup-confirmation/password-reset: 60-second cooldown (configurable). Verification /auth/v1/verify: 360/hour per IP, NOT configurable. Token refresh /auth/v1/token: 1,800/hour per IP, NOT configurable. MFA challenge/verify: 15/hour per IP, NOT configurable. Anonymous sign-ins: 30/hour per IP, NOT configurable. Mechanism is a token bucket with max capacity 30 requests, so short bursts of up to 30 are absorbed. Configurable limits live in Dashboard > Authentication > Rate Limits. CAPTCHA (hCaptcha / Cloudflare Turnstile) is togglable under Settings > Authentication > Bot and Abuse Protection and protects signup, sign-in and password reset.",
+   "implication": "Three actionable consequences: (a) custom SMTP (Resend/SES/Postmark) is mandatory before launch \u2014 the default 2 emails/hour makes any real signup flow impossible; (b) the per-IP limits are dangerous in India where large numbers of students share a carrier CGNAT IP or a coaching-centre WiFi \u2014 360 verifies/hour and 1,800 token refreshes/hour per IP can throttle an entire coaching batch sitting in one room; (c) raise the project-wide OTP/hour limit well above 30 before a signup campaign, and enable Turnstile to stop OTP-burning bots (each wasted OTP is real money in India).",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/auth/rate-limits"
+  },
+  {
+   "title": "India phone OTP economics: use the Send SMS Hook with an Indian DLT provider, not Twilio",
+   "detail": "Indian SMS OTP delivered cost 2026: \u20b90.10\u2013\u20b90.45. MSG91 ~\u20b90.15 (some sources \u20b90.15\u20130.20), Gupshup ~\u20b90.17, Kaleyra ~\u20b90.18, Twilio India ~\u20b90.45\u20130.63 with forex surcharge \u2014 MSG91 vs Twilio saves 60\u201370%. TRAI DLT registration is mandatory: ~\u20b95,900 principal-entity + ~\u20b95,900 header, amortise over 12 months. Supabase supports a custom Send SMS Hook (Postgres function or HTTP endpoint) so any Indian provider can be wired in without leaving Supabase Auth.",
+   "implication": "At 10,000 signups with ~1.4 OTPs each: MSG91 \u2248 \u20b92,100 (~$25) vs Twilio \u2248 \u20b96,300\u20138,800 (~$75\u2013105). More importantly, DLT-registered transactional routes on Jio/Airtel/Vi/BSNL deliver far more reliably in India than international routes. Budget the \u20b911,800 one-time DLT cost and a 1\u20132 week registration lead time into the launch plan.",
+   "confidence": "medium",
+   "source": "https://www.messagecentral.com/en-in/blog/sms-otp-pricing-india"
+  },
+  {
+   "title": "Supabase is AWS-only \u2014 India = ap-south-1 Mumbai; GCP is a different cloud with cross-cloud egress",
+   "detail": "Supabase runs exclusively on AWS. The India region is 'South Asia (Mumbai), ap-south-1'. General regions (East US, Central EU, Southeast Asia) do not support read replicas or API management. Cloud Run's Indian regions are asia-south1 (Mumbai, Tier 1 pricing) and asia-south2 (Delhi, Tier 2); asia-south1 is generally available for standard Cloud Run (the 'by invitation only' note applies specifically to L4 GPU configurations). Cloud Run egress to internet ~$0.12/GB; Supabase egress $0.09/GB uncached, $0.03/GB cached.",
+   "implication": "Pin the Supabase project to ap-south-1 and all GCP services to asia-south1. AWS-Mumbai <-> GCP-Mumbai is a short hop but every byte is billed on the egress side of each cloud. Design GCP workers to pull compact result sets and push aggregates, never to stream raw answer rows across clouds. Do NOT put question images in GCS if they are also in Supabase Storage \u2014 pick one origin.",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/platform/regions"
+  },
+  {
+   "title": "Storage, Smart CDN and image transformations for question images",
+   "detail": "Smart CDN caches assets including signed URLs, and auto-invalidates on update/delete (including transformed variants), with up to 60s global propagation. Image transformation happens at the CDN edge with automatic format negotiation (JPEG to WebP for Chrome). Billing: charged per DISTINCT ORIGIN image transformed per billing period, unlimited transformations per origin image; 100 origin images included on Pro/Team; $5 per 1,000 origin images beyond, billed in whole packages (1,001 images = $10). Max file size: 50 MB on Free, up to 500 GB configurable on Pro+ (global setting, per-bucket can be lower). Egress: Storage counts toward the $0.09/GB uncached / $0.03/GB cached buckets, 250 GB each included on Pro.",
+   "implication": "A question bank of 50,000 images costs ~$250/mo in transformation fees at $5/1,000 origin images \u2014 non-trivial. Mitigate by pre-generating 2\u20133 fixed widths at upload time into a derived bucket (one-time transformation cost) rather than transforming on read, and by serving via signed URLs with long expiry so Smart CDN cache hits dominate ($0.03/GB not $0.09/GB). Also cache aggressively in the RN client (expo-image disk cache) \u2014 offline-capable question images are a product win and an egress win.",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/platform/manage-your-usage/storage-image-transformations"
+  },
+  {
+   "title": "Full 2026 Supabase pricing sheet at this scale",
+   "detail": "Pro $25/mo including $10 compute credits; Team $599/mo including $10 credits; Enterprise custom. MAU: 50,000 included on Free, 100,000 on Pro/Team, overage $0.00325/MAU (counted as distinct users who log in or refresh a token in the cycle). DB storage: 500 MB Free / 8 GB Pro, overage $0.125/GB/mo. Egress: 5 GB Free / 250 GB Pro-Team uncached AND a separate 250 GB cached quota; $0.09/GB uncached, $0.03/GB cached; egress is charged for Database (PostgREST + Supavisor), Auth, Storage, Edge Functions, Realtime and Log Drains. Realtime messages 5M included Pro/Team, $2.50/1M over. Realtime peak connections 500 included, $10/1,000 over. Image transformations 100 origin images, $5/1,000 over. PITR $100/mo per 7-day window. Compute after the $10 credit: Small $5, Medium $50, Large $100, XL $200, 2XL $400, 4XL ~$950.",
+   "implication": "Realistic monthly bill for a 10k-concurrent exam product on Pro: $25 base + $400\u2013950 compute + ~$100 PITR + ~$95 realtime peak-connection overage + egress. If egress runs 1.5 TB/mo (question images + API payloads) that adds roughly $110\u2013170. Estimate $700\u20131,400/mo. Team ($599) only becomes worth it for SOC2/SSO/priority support, not for quota headroom.",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/platform/manage-your-usage/egress"
+  },
+  {
+   "title": "Answer-row storage is cheap \u2014 the schema decision should be driven by query shape, not cost",
+   "detail": "Derived estimate (unverified arithmetic, not from a source): a narrow answer row (attempt_id bigint, question_id bigint, chosen_option smallint, is_marked bool, time_spent_ms int, answered_at timestamptz, plus 24-byte tuple header) is ~70\u201390 bytes on disk, ~120\u2013150 bytes with alignment and a PK btree entry. One JEE Main sitting = 10,000 students x 180 questions = 1.8M rows, roughly 250\u2013350 MB including indexes. 100 test events/year at that scale = 180M rows, roughly 25\u201335 GB, about $3\u20134.50/mo at $0.125/GB/mo.",
+   "implication": "Do not choose a JSONB blob per attempt to 'save space' \u2014 the saving is worth single-digit dollars. Choose one row per answer because it gives you per-question analytics, per-topic difficulty calibration, partial-submit durability, and cheap idempotent upserts. Use JSONB only as a denormalised snapshot column on the attempt row for fast 'resume test' reads.",
+   "confidence": "medium",
+   "source": "https://supabase.com/docs/guides/platform/manage-your-usage/egress"
+  },
+  {
+   "title": "Partitioning: declarative RANGE + pg_partman, with the composite-PK constraint",
+   "detail": "Supabase supports Postgres native declarative partitioning and ships pg_partman. Pattern: `CREATE TABLE public.responses (id bigint, answered_at timestamptz not null, ..., primary key (answered_at, id)) PARTITION BY RANGE (answered_at)`, then `create_parent()` with control column, type 'range', interval and start date \u2014 create_parent takes a brief ACCESS EXCLUSIVE lock. Hard constraint: 'the partitioning column must be included in any unique index (including the primary key)'. For large existing tables, copy in batches by time range during a maintenance window. pg_partman maintenance must be scheduled (via pg_cron / Supabase Cron) so future partitions are pre-created and retention applied. Reported benefit: 5\u201320x faster queries via partition pruning.",
+   "implication": "Partition `responses` by RANGE on answered_at monthly (or by test_id list-partition if tests are the dominant access pattern). Your idempotency unique key must therefore include the partition column, e.g. (answered_at, attempt_id, question_id), or you partition on a column already in the key. Schedule `partman.run_maintenance_proc()` on pg_cron hourly and pre-create at least 3 future partitions before any big exam \u2014 a missing partition means every insert fails mid-exam.",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/database/partitions"
+  },
+  {
+   "title": "BRIN vs BTREE for the responses table",
+   "detail": "On append-only tables where rows arrive in time-correlated physical order, a BRIN index on the timestamp is 'dozens to hundreds of times smaller' than an equivalent btree \u2014 one measurement puts BRIN at ~0.1% of the btree's size \u2014 with much lower per-row update cost. BTree wins on small/selective result sets; BRIN pulls ahead as result sets grow (e.g. 1M rows out of 10M\u2013100M). Standard recommendation is a hybrid: BRIN on the timestamp of large cold partitions, BTREE on the identifier columns used for point lookups.",
+   "implication": "On `responses`: BTREE on (attempt_id, question_id) for the hot in-exam read/upsert path (this is the idempotency key anyway), BRIN on answered_at for analytics scans over historic partitions. Do NOT add a BTREE on answered_at \u2014 it is pure write amplification during the exam, which is exactly when you are IOPS-constrained. Every extra index on `responses` costs write throughput at 10k-concurrent insert rates.",
+   "confidence": "medium",
+   "source": "https://www.crunchydata.com/blog/postgresql-brin-indexes-big-data-performance-with-minimal-storage"
+  },
+  {
+   "title": "Concurrency: READ COMMITTED + advisory locks + ON CONFLICT beats SERIALIZABLE for scoring",
+   "detail": "Postgres SSI (SERIALIZABLE) performs comparably to snapshot isolation on read-intensive workloads and far better than 2PL, but under multi-writer contention serialization-failure rates track (w-1)/w for w concurrent writers, and every aborted transaction must be retried by the application \u2014 READ COMMITTED achieves the highest commit throughput with no aborts. `INSERT ... ON CONFLICT DO NOTHING` does not take a row-level lock on the conflicting row, making it substantially cheaper than DO UPDATE for idempotency-key-style writes where you only need the row to exist. Advisory locks (pg_try_advisory_xact_lock) let you serialize on a key of your choosing \u2014 e.g. 'score_attempt_<id>' \u2014 without locking data, and work when the workflow spans multiple tables or external calls.",
+   "implication": "Concrete design: answer sync = `INSERT ... ON CONFLICT (attempt_id, question_id) DO UPDATE SET chosen_option=EXCLUDED.chosen_option WHERE responses.client_seq < EXCLUDED.client_seq` (a monotonic client sequence number makes late/duplicate/out-of-order syncs safe). Scoring = READ COMMITTED transaction guarded by `pg_try_advisory_xact_lock(hashtext('score:'||attempt_id))`; if the lock is not acquired the job is already running \u2014 return early, do not retry-storm. Reserve SERIALIZABLE for the coins/rewards ledger where double-spend matters, wrapped in an explicit retry loop on SQLSTATE 40001.",
+   "confidence": "medium",
+   "source": "https://www.postgresql.org/docs/current/transaction-iso.html"
+  },
+  {
+   "title": "PostgREST returns max 1,000 rows by default \u2014 silent truncation, no error",
+   "detail": "Supabase projects cap Data API responses at 1,000 rows by default (Dashboard > Integrations > Data API > Settings > Max rows). Requests exceeding it are silently truncated \u2014 no exception is thrown. Reported real-world failure mode: 'Pages render with missing data silently.' Supabase recommends keeping the value low to bound payload size from accidental or malicious requests. Use .range() for pagination.",
+   "implication": "A 180-question paper fits, but 'fetch all my past attempts', 'admin exports all responses for a test' (1.8M rows) and leaderboard queries will silently truncate. Keep max-rows at 1,000, force .range() pagination everywhere, and route admin bulk export through an Edge Function/Cloud Run job that paginates server-side and streams a CSV to Storage.",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/api"
+  },
+  {
+   "title": "Documented 1k to 10k failure modes on Supabase (May 2026 field report)",
+   "detail": "Reported breakages with triggers: (1) RLS quadratic \u2014 hits at ~100k rows in busy tables, typically crossed before 10k MAU; fixes measured 179ms to 9ms and 11,000ms to 10ms. (2) Direct connection pool saturation \u2014 Micro has 60 direct connections while a serverless front end can autoscale to 30,000 concurrent executions; 'looks like a database outage in logs during lunch-hour peaks'; fix is Supavisor 6543. (3) 1,000-row PostgREST ceiling with no error. (4) Cache-hit-ratio collapse when the working set exceeds shared_buffers \u2014 'latency doubles, then triples' with no slow-query signature; threshold is cache hit ratio dropping below 99%. (5) Background jobs on the request path \u2014 webhooks/emails run inside user-facing functions, long jobs stall short ones. Reported fixes: materialized views 12s to 200ms and 8.4s to 180ms; composite indexes 4.2s to 48ms.",
+   "implication": "Add a cache-hit-ratio alert (pg_statio_user_tables, alert below 99%) \u2014 this is the failure mode with no obvious signal. Pre-compute leaderboards and analytics dashboards as materialized views refreshed by pg_cron, never as live aggregate queries during a test. Move every non-user-facing job (scoring, notification fan-out, streak recomputation) off the request path into pgmq/Cloud Tasks before the first 10k test.",
+   "confidence": "medium",
+   "source": "https://appssemble.com/blog/lovable-supabase-1000-vs-10000-users"
+  },
+  {
+   "title": "Read replicas: available but useless for Auth/Storage/Realtime",
+   "detail": "Read replicas: 'Requests to other Supabase products, such as Auth, Storage, and Realtime, aren't able to use a Read Replica or its API endpoint' and 'all Auth requests are handled by the Primary, even when sent over the load balancer endpoint.' Since 2025-04-04 the load balancer uses geo-routing to the closest available database rather than round-robin; GET requests can go to replicas, non-GET always goes to Primary. Replication lag exists and is dashboard-monitored. Supabase's own guidance: reach for replicas 'after you reach the largest compute size of 16XL or earlier if you need workload isolation or geographic distribution'.",
+   "implication": "Do not buy replicas to solve exam-time load \u2014 writes and Auth (the 10k-login burst) still land on the primary. Replicas are worth it only for isolating heavy admin analytics queries away from the exam-serving primary, or if you later serve students outside India. Replication lag also makes them wrong for 'show me the answer I just saved'.",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/platform/read-replicas"
+  },
+  {
+   "title": "GCP async layer: Cloud Tasks vs Pub/Sub numbers",
+   "detail": "Cloud Tasks: max 500 dispatches/sec per queue, max 5,000 concurrent tasks per queue, 1 MiB per task including headers/metadata, ~$0.40 per million operations ($40/billion), supports per-queue rate limiting, scheduled/delayed delivery and task-level dedup. Pub/Sub: 10 MB max message, priced on monthly data volume, no per-queue dispatch-rate control on push subscriptions, better for fan-out to multiple consumers. Cloud Run: default concurrency 80, configurable to 1,000 per instance; default revision max instances 100; request timeout default 300s, max 3,600s; free tier 180,000 vCPU-s + 360,000 GiB-s + 2M requests/mo; Tier 1 rates $0.000024/vCPU-s, $0.0000025/GiB-s, $0.40/M requests; asia-south1 is Tier 1.",
+   "implication": "Use Cloud Tasks (not Pub/Sub) for post-exam scoring: you need exactly the per-queue dispatch throttle to avoid 10,000 scoring jobs stampeding Postgres. Set max dispatches/sec to ~50 and max concurrent to ~20, matched to your Supavisor pool size. 1.8M answer rows will not fit in a 1 MiB task \u2014 pass attempt_id references, never payloads. Alternative with zero extra infra: Supabase Queues (pgmq) + Supabase Cron (pg_cron) + Edge Functions, which keeps everything in-database and avoids cross-cloud egress entirely.",
+   "confidence": "high",
+   "source": "https://docs.cloud.google.com/tasks/docs/quotas"
+  },
+  {
+   "title": "Push notifications: FCM v1 is mandatory for RN/Expo Android; Expo push caps at 600/sec",
+   "detail": "Legacy FCM API deprecated 2023-06-20, removed 2024-06-21 \u2014 FCM HTTP v1 credentials are required for Android. Expo Push Service: hard throughput limit of 600 notifications/second per project, max 100 notifications per request; free with no per-notification fee and no volume cap; expo-server-sdk-node handles chunking and throttling. From Expo SDK 53 onward push notifications do not work in Expo Go on Android \u2014 a development build is required.",
+   "implication": "600/sec means a broadcast to 10,000 students takes ~17 seconds minimum via Expo Push \u2014 acceptable for 'results are out' but not for a synchronised 'test starts now' signal. For time-critical exam-start signalling use Realtime Broadcast (in-app) with push as fallback. If you outgrow Expo Push, go direct to FCM v1 (Android) + APNs (iOS) from a Cloud Run worker; you need the FCM service account key regardless.",
+   "confidence": "high",
+   "source": "https://docs.expo.dev/push-notifications/sending-notifications/"
+  },
+  {
+   "title": "BigQuery and Memorystore costs for the analytics/rewards layer",
+   "detail": "BigQuery 2026: 1 TiB queries + 10 GiB storage free per month; on-demand $6.25/TiB scanned; capacity/slot pricing $0.04\u2013$0.10 per slot-hour; active storage $0.02/GB/mo, long-term (untouched 90+ days) $0.01/GB/mo. Memorystore for Redis Cluster is available in asia-south1 (Mumbai) and bills per GiB-hour of provisioned capacity; Basic M1 tier (1\u20134 GiB) around $0.049/GiB-hr (region-specific rates require the pricing calculator). Committed use discounts are available for Memorystore Redis Cluster.",
+   "implication": "180M answer rows is roughly 25\u201335 GB in BigQuery, about $0.50\u20130.70/mo storage. The risk is on-demand scan cost: a naive full-table scan costs ~$0.20 per run, but an unpartitioned dashboard hitting it hourly is ~$150/mo. Partition and cluster the BigQuery table by exam date + subject and always use partition filters. For Redis, a 4 GiB Memorystore node at ~$0.049/GiB-hr is roughly $140/mo \u2014 compare against Upstash serverless Redis, likely cheaper for bursty exam-window leaderboard traffic.",
+   "confidence": "medium",
+   "source": "https://cloud.google.com/bigquery/pricing"
+  },
+  {
+   "title": "Self-hosting Supabase on GCP: not worth it below ~$500\u20131,000/mo of managed spend",
+   "detail": "A production workload at 32 GB RAM / 100 GB storage runs $200\u2013400/mo on Supabase Cloud; comparable bare metal (e.g. Hetzner Ryzen 5 3600, 64 GB RAM, 2x NVMe) is ~39 EUR/mo, with GCP roughly in between. But self-hosted Supabase requires monthly updates with service restarts and brief downtime, whereas Cloud updates are automatic zero-downtime. Field guidance: migrate off managed when the bill 'consistently exceeds $500\u2013$1,000/mo dominated by compute (not features)', when the workload is heavy OLAP or sustained high-write, or under regulatory constraints; raw VM alternatives cost ~$150\u2013200/mo but add 5\u201310 hours/month of DevOps.",
+   "implication": "For a JEE/NEET app the answer is clearly managed Supabase for now: self-hosting forfeits PITR, automatic zero-downtime upgrades, Supavisor HA, Smart CDN and the Realtime cluster \u2014 and you would own a Postgres failover runbook during a live exam. Revisit only if compute alone exceeds ~$1,000/mo. If data-residency pressure appears (Indian DPDP Act), note ap-south-1 already keeps data in India.",
+   "confidence": "medium",
+   "source": "https://www.happycoding.agency/en/blog/what-supabase-really-costs-in-production"
+  },
+  {
+   "title": "JWT signing keys moved to asymmetric \u2014 affects how GCP services verify tokens",
+   "detail": "Asymmetric JWT support shipped as opt-in in 2025; all NEW Supabase projects use asymmetric JWTs by default from 2025-10-01, with full transition of all projects expected by late 2026. Default algorithm RS256, optionally ECC (ES256, more performant) or Ed25519. Public keys are exposed via a JWKS endpoint; rotated public keys remain in the JWKS so existing JWTs stay verifiable. Benefit: no shared secret, and verification is local \u2014 no network call to Supabase Auth via getUser().",
+   "implication": "Cloud Run scoring/admin services should verify student and admin JWTs locally against the Supabase JWKS endpoint (cache the JWKS, respect kid rotation) rather than calling getUser() per request \u2014 that removes a network round-trip and an Auth rate-limit surface from every GCP-side request. Confirm the project is on asymmetric keys before writing verification code; an older project may still be on HS256.",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/auth/signing-keys"
+  },
+  {
+   "title": "Postgres-level knobs Supabase exposes and the ones you must set",
+   "detail": "Customisable via CLI/SQL: max_connections (CLI only, requires DB restart), work_mem (CLI + SQL, no restart), session_replication_role (CLI only), statement_timeout (CLI + SQL, e.g. `alter database \"postgres\" set \"statement_timeout\" TO '60s';`). Command form: `supabase postgres-config update --config <param>=<value> --project-ref <ref> --experimental`. Warning from docs: 'CLI changes permanently overwrite default settings' \u2014 reset commands will not restore originals; 'Inappropriate settings can lead to severe performance degradation or project instability.' PITR is recommended once the database exceeds 4 GB. Load testing with k6 is Supabase's own recommendation in the production checklist. OTP expiry should be set to 3600s (1 hour) or lower.",
+   "implication": "Set a per-role statement_timeout: short for `authenticated` (e.g. 8s \u2014 a student query should never run longer) and longer for `service_role` (e.g. 120s for scoring/export). This is your primary defence against one pathological query pinning a connection during an exam. Do NOT raise max_connections to 'fix' pooling \u2014 RAM per backend is the real limit and you will OOM the instance. Run a k6 test simulating 10,000 virtual users doing login, fetch paper, 180 answer syncs, submit \u2014 against a staging project at the same compute tier, before the first real test.",
+   "confidence": "high",
+   "source": "https://supabase.com/docs/guides/database/custom-postgres-config"
+  }
+ ],
+ "recommendations": [
+  "Write an RLS style guide and enforce it in CI: every policy must (a) name a role with TO authenticated / TO anon, (b) wrap every function call in a scalar subquery \u2014 (select auth.uid()), (select public.authorize('x')) \u2014 (c) reference only columns that carry a btree index, and (d) push any cross-table check into a `SECURITY DEFINER ... STABLE ... SET search_path = ''` helper rather than a join inside the policy. Add a migration test that runs Supabase's Security Advisor / splinter and fails on lint 0015 (RLS references user_metadata) and on any table with RLS disabled in the public schema.",
+  "Implement RBAC exactly as Supabase's official pattern: enums app_role ('admin','student') and app_permission; server-owned public.user_roles and public.role_permissions; a custom_access_token_hook injecting user_role into the JWT; grants to supabase_auth_admin with explicit REVOKE from authenticated/anon/public. Never read role from user_metadata. For 'admin bypasses RLS', do NOT ship the service_role key to any client \u2014 instead add a permissive policy `USING ((select public.authorize('questions.write')))` scoped to the admin role, or expose admin write paths only through Edge Functions / Cloud Run holding the service key server-side.",
+  "Keep 100% of student traffic on the HTTP surfaces (PostgREST Data API, GoTrue, Storage, Realtime) so 10k concurrent students never map to 10k Postgres connections. Use Supavisor transaction mode (port 6543) only for your own GCP workers, disable prepared statements in those drivers (Prisma `?pgbouncer=true`, asyncpg `statement_cache_size=0`, JDBC `prepareThreshold=0`), and size each worker's client pool so total workers x pool <= the project Pool Size. Provision 2XL as the baseline and pre-scale to 4XL (480 direct connections, 3,000 pooler clients, 20,000 IOPS) for scheduled exam windows, then scale back.",
+  "Model exam writes as one narrow row per answer in `responses`, RANGE-partitioned monthly on answered_at via pg_partman with maintenance on pg_cron and at least 3 future partitions pre-created. Index only what the hot path needs: BTREE on (attempt_id, question_id) \u2014 which doubles as the idempotency key \u2014 and BRIN on answered_at for analytics. Client batches answer syncs every 10\u201330s (and on every navigation away) sending a monotonic client_seq; server does `INSERT ... ON CONFLICT (attempt_id, question_id) DO UPDATE ... WHERE responses.client_seq < EXCLUDED.client_seq` so retries, duplicates and out-of-order arrivals are all safe. Score under READ COMMITTED guarded by pg_try_advisory_xact_lock; reserve SERIALIZABLE with an explicit 40001 retry loop for the coins/rewards ledger only.",
+  "Build leaderboards and live counters on Realtime Broadcast plus Redis, never on postgres_changes (single-threaded, ~4,000 msgs/sec ceiling with RLS). Before any 10k-student test: disable the Pro spend cap to lift peak connections from 500 to 10,000, and add client-side random jitter (0\u201360s) to channel joins because joins/sec is capped at 2,500. Budget ~$95/mo of peak-connection overage at 10k.",
+  "Harden Auth before launch: configure custom SMTP (the built-in provider is 2 emails/hour project-wide), wire an Indian DLT-registered SMS provider (MSG91 ~\u20b90.15 vs Twilio ~\u20b90.45\u20130.63) through the Send SMS Hook, start DLT registration early (~\u20b911,800, multi-week lead time), raise the configurable project-wide OTP/hour limit well above the 30 default, set OTP expiry <=3600s, and enable Cloudflare Turnstile or hCaptcha on signup/sign-in/password-reset. Explicitly test the CGNAT/coaching-centre scenario: the non-configurable per-IP limits (360 verifies/hr, 1,800 token refreshes/hr) can throttle a whole classroom on one IP.",
+  "Keep GCP narrow and co-located in asia-south1 (Tier 1 Cloud Run pricing) against a Supabase project in ap-south-1: FCM v1 for push (mandatory for Expo/Android anyway; Expo Push caps at 600/sec so use Realtime Broadcast for exam-start signalling), Cloud Run + Cloud Tasks for async scoring with the per-queue dispatch rate throttled to match your Supavisor pool (e.g. 50/sec, 20 concurrent), and BigQuery partitioned+clustered by exam date for analytics. Verify JWTs locally against the Supabase JWKS endpoint rather than calling getUser() per request. Do NOT split object storage across GCS and Supabase Storage \u2014 one origin only, to avoid paying cross-cloud egress on question images.",
+  "Instrument the two failure modes that have no obvious signal: (a) alert when the buffer cache hit ratio drops below 99% (pg_statio_user_tables) \u2014 this is what makes latency 'double, then triple' with no slow-query entry; (b) alert on Supavisor client-connection saturation and on pg_stat_activity wait events. Set a per-role statement_timeout (authenticated ~8s, service_role ~120s) so one pathological query cannot pin a backend mid-exam. Run a k6 load test at the target compute tier simulating 10,000 VUs doing login, fetch paper, 180 answer syncs, submit \u2014 before the first real test.",
+  "Precompute rather than aggregate live: materialized views refreshed by pg_cron for leaderboards, chapter-wise accuracy, and admin dashboards (reported gains 12s to 200ms and 8.4s to 180ms). Keep PostgREST max-rows at 1,000 and force .range() pagination everywhere; route admin bulk exports (1.8M rows per test) through a paginating Cloud Run job that streams CSV into Storage rather than through the Data API.",
+  "Pre-generate 2\u20133 fixed image widths at upload time into a derived bucket instead of transforming on read \u2014 the transformation bill is $5 per 1,000 distinct origin images per billing period (only 100 included), so a 50,000-image bank transformed on read costs ~$250/mo. Serve via long-expiry signed URLs so Smart CDN cache hits dominate ($0.03/GB cached vs $0.09/GB uncached), and cache aggressively on-device with expo-image for offline practice.",
+  "Stay on managed Supabase. Self-hosting on GCP only pencils out above roughly $500\u20131,000/mo of compute-dominated spend, and it costs you PITR, zero-downtime upgrades, Supavisor HA and Smart CDN \u2014 plus you would own a Postgres failover runbook during a live exam. Enable PITR ($100/mo per 7-day window) as soon as the DB exceeds 4 GB, and do not buy read replicas to solve exam load (writes and all Auth still hit the primary); use them only to isolate heavy admin analytics."
+ ],
+ "pitfalls": [
+  "Storing the ADMIN role in user_metadata. Any client can call supabase.auth.updateUser({ data: { is_admin: true } }) and escalate. Supabase's own splinter lint 0015 flags this as ERROR. Role must come from a server-owned table projected into the JWT by the custom access token hook, or from app_metadata written only via the Admin API.",
+  "Bare auth.uid() / helper functions inside RLS policies. Re-evaluated once per row: measured 171ms to <0.1ms, 11,000ms to 10ms, and 178,000ms to 12ms after wrapping in (select ...). Also: unindexed RLS predicate columns and unindexed foreign keys (Postgres does not auto-index FKs) \u2014 a 1M-row team policy went from >2 minutes to 2ms once indexed and wrapped. This does not show up in dev with 1k rows.",
+  "Prepared statements against Supavisor transaction mode (port 6543). Docs are explicit that transaction mode does not support them. Prisma without ?pgbouncer=true, or asyncpg/JDBC without statement_cache_size=0 / prepareThreshold=0, produce intermittent 'prepared statement already exists' errors that appear ONLY under concurrency \u2014 i.e. during the live exam, not in testing.",
+  "Building live leaderboards or 'students online' on Realtime postgres_changes. Changes are processed on a single thread to preserve order and RLS-filtered configurations top out around 4,000 msgs/sec regardless of compute size; a Large-to-16XL DB is documented at only 0.05 changes/sec sustained for 200k clients. Broadcast does 224,000 msgs/sec at 32k clients. Wrong primitive means the leaderboard silently lags then stalls.",
+  "Launching on Pro with the spend cap ON. That pins Realtime to 500 peak connections and 500 channel joins/sec \u2014 10,000 students joining a scheduled test in the first minute will get too_many_connections / too_many_joins. Turning the cap off raises it to 10,000 connections and 2,500 joins/sec, but a 10,000-student simultaneous join still needs client-side jitter to stay under 2,500/sec.",
+  "The built-in email provider's 2 emails per hour, project-wide. Not a per-user limit. Without custom SMTP a signup campaign delivers essentially zero confirmation emails. Separately, per-IP limits that CANNOT be raised (360 verifies/hr, 1,800 token refreshes/hr, 15 MFA/hr, 30 anonymous signups/hr) will throttle an entire coaching centre or CGNAT-shared carrier IP \u2014 a very real scenario in India.",
+  "PostgREST's silent 1,000-row cap. No exception is raised; pages simply render with missing data. Hits 'all my past attempts', leaderboards, and any admin export. Every list query needs explicit .range() pagination and an integration test asserting counts past 1,000.",
+  "Doing CPU-bound scoring inside an Edge Function. Hard limits are 256 MB memory and 2 seconds of actual CPU time per request (async I/O excluded); wall clock is 400s on paid plans but the CPU limit bites first. Scoring 180 questions x 10,000 attempts belongs in a Postgres function or Cloud Run (60-min timeout), not an Edge Function.",
+  "Missing pg_partman future partitions. If maintenance is not scheduled on pg_cron and the next period's partition does not exist, every INSERT into `responses` fails \u2014 mid-exam, for every student, simultaneously. Also remember the native-partitioning constraint: the partition key must be part of every unique index including the primary key, which changes the shape of your idempotency key.",
+  "Reaching for SERIALIZABLE to make scoring 'safe'. Under w concurrent writers serialization-failure rates track (w-1)/w and every abort must be retried in application code; with 10,000 concurrent submits you get a retry storm. READ COMMITTED plus a per-attempt advisory lock plus ON CONFLICT gives correctness without the abort rate. Note ON CONFLICT DO UPDATE takes a row lock; DO NOTHING does not.",
+  "Assuming read replicas fix exam-time load. Auth requests always go to the primary even through the load balancer, Storage and Realtime cannot use replicas at all, and all writes go to the primary. Replication lag also breaks read-your-own-write ('where is the answer I just saved?').",
+  "Cross-cloud data movement between Supabase (AWS ap-south-1) and GCP (asia-south1). Supabase is AWS-only. Every byte pulled out of Supabase is billed at $0.09/GB uncached, and Cloud Run internet egress is ~$0.12/GB. Streaming raw answer rows to a GCP worker for scoring, or mirroring question images into GCS, converts a free in-database operation into a recurring bandwidth bill \u2014 and adds a network partition to your exam critical path."
+ ],
+ "openQuestions": [
+  "Exact Supabase pooler behaviour for the Data API path at 10k concurrent: how many Postgres backends does PostgREST hold per compute tier, and is that db-pool value tunable on the platform? Not documented publicly \u2014 needs a support ticket or an empirical pg_stat_activity measurement under k6 load.",
+  "Does Supabase apply a request-rate limit (not just Auth rate limits) on the PostgREST Data API per project or per IP? No published number found; 10k students each firing an answer-sync every 10s is ~1,000 req/s sustained plus burst, and it is unclear whether anything upstream of Postgres throttles that.",
+  "Actual sustained insert throughput of the partitioned responses table with RLS enabled on a 2XL vs 4XL. All published Supabase numbers are Realtime or pooler benchmarks; the write path with RLS + partition routing + BTREE upsert has no published figure and must be measured.",
+  "Real cold-start and p99 latency of Supabase Edge Functions from Indian mobile networks against an ap-south-1 project in 2026. The 42ms average / 460ms p99 figures come from a July 2025 post with unspecified region; Indian 4G RTT will dominate and needs measurement from real devices.",
+  "Whether Supabase Auth's per-IP limits (360 verify/hr, 1,800 refresh/hr) can be raised for an enterprise contract or via an IP allowlist. Docs say 'not customizable'; whether Enterprise gets an exception is unknown and is a material risk for coaching-centre deployments.",
+  "Exact asia-south1 (Mumbai) pricing for Memorystore for Redis Cluster per GiB-hour \u2014 Google publishes per-region rates only via the calculator. Also whether Upstash serverless Redis is cheaper for the bursty exam-window leaderboard pattern than a provisioned Memorystore node.",
+  "Whether Supabase Queues (pgmq) can sustain the enqueue rate for 10,000 scoring jobs submitted within a few minutes, and whether unlogged queues (faster writes, no crash durability) are acceptable for scoring jobs. No published throughput benchmark found.",
+  "Whether the spend-cap-off Realtime limit of 10,000 peak connections is a hard ceiling or soft; docs say 'contact support for customization on paid plans' but give no achievable number, which matters if you exceed 10,000 simultaneous test-takers.",
+  "Indian DPDP Act implications of routing student data through GCP asia-south1 and AWS ap-south-1 (both in-country) versus Supabase's control-plane and log storage locations, which are not documented per-region.",
+  "Whether the project is already on asymmetric JWT signing keys (RS256/ES256 + JWKS) or still on the legacy shared HS256 secret \u2014 this changes how GCP-side services must verify tokens and whether getUser() network calls can be eliminated."
+ ],
+ "sources": [
+  "https://supabase.com/docs/guides/troubleshooting/rls-performance-and-best-practices-Z5Jjwv",
+  "https://supabase.com/docs/guides/database/postgres/custom-claims-and-role-based-access-control-rbac",
+  "https://supabase.github.io/splinter/0015_rls_references_user_metadata/",
+  "https://supabase.com/docs/guides/platform/compute-and-disk",
+  "https://supabase.com/docs/guides/database/connecting-to-postgres",
+  "https://supabase.com/blog/supavisor-1-million",
+  "https://supabase.com/docs/guides/realtime/benchmarks",
+  "https://supabase.com/docs/guides/realtime/quotas",
+  "https://supabase.com/docs/guides/functions/limits",
+  "https://supabase.com/blog/persistent-storage-for-faster-edge-functions",
+  "https://supabase.com/docs/guides/auth/rate-limits",
+  "https://supabase.com/docs/guides/deployment/going-into-prod",
+  "https://supabase.com/docs/guides/platform/manage-your-usage/egress",
+  "https://supabase.com/docs/guides/platform/manage-your-usage/monthly-active-users",
+  "https://supabase.com/docs/guides/platform/manage-your-usage/realtime-messages",
+  "https://supabase.com/docs/guides/platform/manage-your-usage/realtime-peak-connections",
+  "https://supabase.com/docs/guides/platform/manage-your-usage/storage-image-transformations",
+  "https://supabase.com/docs/guides/storage/cdn/smart-cdn",
+  "https://supabase.com/docs/guides/storage/uploads/file-limits",
+  "https://supabase.com/docs/guides/platform/read-replicas",
+  "https://supabase.com/docs/guides/platform/regions",
+  "https://supabase.com/docs/guides/database/partitions",
+  "https://supabase.com/docs/guides/database/migrating-to-pg-partman",
+  "https://supabase.com/docs/guides/database/custom-postgres-config",
+  "https://supabase.com/docs/guides/api",
+  "https://supabase.com/docs/guides/auth/signing-keys",
+  "https://supabase.com/docs/guides/auth/auth-captcha",
+  "https://supabase.com/docs/guides/queues/pgmq",
+  "https://supabase.com/docs/guides/auth/auth-hooks/custom-access-token-hook",
+  "https://dev.to/arvavit/76-rls-policies-rewritten-in-one-migration-the-authuid-init-plan-trap-in-supabase-4hg",
+  "https://appssemble.com/blog/lovable-supabase-1000-vs-10000-users",
+  "https://www.frontendtechlead.com/blog/supabase-production-architecture-2026",
+  "https://makerkit.dev/blog/saas/supabase-pricing",
+  "https://www.happycoding.agency/en/blog/what-supabase-really-costs-in-production",
+  "https://www.crunchydata.com/blog/postgresql-brin-indexes-big-data-performance-with-minimal-storage",
+  "https://www.crunchydata.com/blog/postgres-indexing-when-does-brin-win",
+  "https://www.postgresql.org/docs/current/transaction-iso.html",
+  "https://viprasol.com/blog/postgres-upsert-patterns/",
+  "https://appmaster.io/blog/postgresql-advisory-locks-double-processing",
+  "https://docs.cloud.google.com/tasks/docs/quotas",
+  "https://docs.cloud.google.com/pubsub/quotas",
+  "https://docs.cloud.google.com/run/docs/locations",
+  "https://docs.cloud.google.com/run/docs/about-concurrency",
+  "https://cloud.google.com/run/pricing",
+  "https://cloud.google.com/bigquery/pricing",
+  "https://cloud.google.com/memorystore/cluster/pricing",
+  "https://docs.expo.dev/push-notifications/sending-notifications/",
+  "https://docs.expo.dev/push-notifications/faq/",
+  "https://www.messagecentral.com/en-in/blog/sms-otp-pricing-india",
+  "https://medium.com/@shreebhagwat94/implementing-custom-sms-authentication-in-supabase-using-sms-hook-and-msg91-366d13acc81c"
+ ]
+}

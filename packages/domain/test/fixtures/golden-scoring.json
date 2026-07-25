@@ -1,0 +1,442 @@
+{
+  "version": 1,
+  "description": "Shared scoring oracle. Every expectation here is written from the published marking scheme, NOT generated from either implementation. The TypeScript engine (packages/domain) and the PL/pgSQL functions (packages/db) are both asserted against this file. If they disagree with it, they are wrong -- the fixture is not updated to match an implementation.",
+  "optionIds": {
+    "note": "Option identity is a stable id, never a letter or an index. Letters here are shorthand for readability only.",
+    "A": "opt-a",
+    "B": "opt-b",
+    "C": "opt-c",
+    "D": "opt-d"
+  },
+  "markingRules": {
+    "MAIN_MCQ": {
+      "questionType": "MCQ_SINGLE",
+      "correct": 4,
+      "incorrect": -1,
+      "unattempted": 0
+    },
+    "MAIN_NUMERIC": {
+      "questionType": "NUMERIC_INTEGER",
+      "correct": 4,
+      "incorrect": -1,
+      "unattempted": 0,
+      "numeric": { "kind": "EXACT_INTEGER" },
+      "penaliseUnparseable": true
+    },
+    "ADV_MULTI": {
+      "questionType": "MCQ_MULTI",
+      "correct": 4,
+      "incorrect": -1,
+      "unattempted": 0,
+      "partial": {
+        "mode": "LADDER_BY_CORRECT_SELECTED",
+        "awardIfAllCorrectSelected": 4,
+        "awardBySelectedCorrectCount": { "1": 1, "2": 2, "3": 3 },
+        "penaltyIfAnyIncorrect": -1
+      }
+    },
+    "ALL_OR_NOTHING_MULTI": {
+      "questionType": "MCQ_MULTI",
+      "correct": 4,
+      "incorrect": -1,
+      "unattempted": 0,
+      "partial": { "mode": "ALL_OR_NOTHING" }
+    },
+    "ADV_NUMERIC_2DP_TRUNCATE": {
+      "questionType": "NUMERIC_DECIMAL",
+      "correct": 4,
+      "incorrect": 0,
+      "unattempted": 0,
+      "numeric": { "kind": "ROUNDED", "decimals": 2, "mode": "TRUNCATE" },
+      "penaliseUnparseable": false
+    },
+    "NUMERIC_2DP_HALFUP": {
+      "questionType": "NUMERIC_DECIMAL",
+      "correct": 4,
+      "incorrect": 0,
+      "unattempted": 0,
+      "numeric": { "kind": "ROUNDED", "decimals": 2, "mode": "HALF_UP" },
+      "penaliseUnparseable": false
+    },
+    "NUMERIC_TOLERANCE": {
+      "questionType": "NUMERIC_DECIMAL",
+      "correct": 4,
+      "incorrect": -1,
+      "unattempted": 0,
+      "numeric": { "kind": "TOLERANCE", "toleranceAbs": "0.01" },
+      "penaliseUnparseable": true
+    }
+  },
+  "cases": [
+    {
+      "id": "single-correct",
+      "rule": "MAIN_MCQ",
+      "selected": ["B"],
+      "numericRaw": null,
+      "key": { "correct": ["B"], "numericValue": null, "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "single-incorrect",
+      "rule": "MAIN_MCQ",
+      "selected": ["A"],
+      "numericRaw": null,
+      "key": { "correct": ["B"], "numericValue": null, "resolution": null },
+      "expect": { "marks": -1, "status": "INCORRECT" }
+    },
+    {
+      "id": "single-unattempted",
+      "rule": "MAIN_MCQ",
+      "selected": [],
+      "numericRaw": null,
+      "key": { "correct": ["B"], "numericValue": null, "resolution": null },
+      "expect": { "marks": 0, "status": "UNATTEMPTED" }
+    },
+    {
+      "id": "single-multiple-selected-is-malformed",
+      "description": "A single-answer question with two selections is malformed input from a scripted client, not partial credit.",
+      "rule": "MAIN_MCQ",
+      "selected": ["A", "B"],
+      "numericRaw": null,
+      "key": { "correct": ["B"], "numericValue": null, "resolution": null },
+      "expect": { "marks": -1, "status": "INCORRECT" }
+    },
+
+    {
+      "id": "adv-multi-all-three-correct",
+      "rule": "ADV_MULTI",
+      "selected": ["A", "B", "C"],
+      "numericRaw": null,
+      "key": { "correct": ["A", "B", "C"], "numericValue": null, "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "adv-multi-two-of-three",
+      "description": "THE critical case. The ladder awards 2. The widely-published proportional formula 4*2/3 = 2.67 is wrong and has never been the scheme.",
+      "rule": "ADV_MULTI",
+      "selected": ["A", "B"],
+      "numericRaw": null,
+      "key": { "correct": ["A", "B", "C"], "numericValue": null, "resolution": null },
+      "expect": { "marks": 2, "status": "PARTIALLY_CORRECT" }
+    },
+    {
+      "id": "adv-multi-one-of-three",
+      "rule": "ADV_MULTI",
+      "selected": ["A"],
+      "numericRaw": null,
+      "key": { "correct": ["A", "B", "C"], "numericValue": null, "resolution": null },
+      "expect": { "marks": 1, "status": "PARTIALLY_CORRECT" }
+    },
+    {
+      "id": "adv-multi-three-of-four",
+      "rule": "ADV_MULTI",
+      "selected": ["A", "B", "C"],
+      "numericRaw": null,
+      "key": { "correct": ["A", "B", "C", "D"], "numericValue": null, "resolution": null },
+      "expect": { "marks": 3, "status": "PARTIALLY_CORRECT" }
+    },
+    {
+      "id": "adv-multi-two-of-four",
+      "rule": "ADV_MULTI",
+      "selected": ["A", "B"],
+      "numericRaw": null,
+      "key": { "correct": ["A", "B", "C", "D"], "numericValue": null, "resolution": null },
+      "expect": { "marks": 2, "status": "PARTIALLY_CORRECT" }
+    },
+    {
+      "id": "adv-multi-any-incorrect-penalty-is-minus-one",
+      "description": "The negative is -1, not the -2 still published by major coaching sites.",
+      "rule": "ADV_MULTI",
+      "selected": ["A", "D"],
+      "numericRaw": null,
+      "key": { "correct": ["A", "B", "C"], "numericValue": null, "resolution": null },
+      "expect": { "marks": -1, "status": "INCORRECT" }
+    },
+    {
+      "id": "adv-multi-all-correct-plus-one-wrong-still-penalised",
+      "rule": "ADV_MULTI",
+      "selected": ["A", "B", "C", "D"],
+      "numericRaw": null,
+      "key": { "correct": ["A", "B", "C"], "numericValue": null, "resolution": null },
+      "expect": { "marks": -1, "status": "INCORRECT" }
+    },
+    {
+      "id": "adv-multi-nothing-selected",
+      "rule": "ADV_MULTI",
+      "selected": [],
+      "numericRaw": null,
+      "key": { "correct": ["A", "B", "C"], "numericValue": null, "resolution": null },
+      "expect": { "marks": 0, "status": "UNATTEMPTED" }
+    },
+    {
+      "id": "adv-multi-duplicate-option-does-not-inflate",
+      "description": "A retried sync could deliver the same option twice; it must not count as two correct selections.",
+      "rule": "ADV_MULTI",
+      "selected": ["A", "A"],
+      "numericRaw": null,
+      "key": { "correct": ["A", "B", "C"], "numericValue": null, "resolution": null },
+      "expect": { "marks": 1, "status": "PARTIALLY_CORRECT" }
+    },
+
+    {
+      "id": "all-or-nothing-exact-set",
+      "rule": "ALL_OR_NOTHING_MULTI",
+      "selected": ["A", "B"],
+      "numericRaw": null,
+      "key": { "correct": ["A", "B"], "numericValue": null, "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "all-or-nothing-subset-gets-no-partial-credit",
+      "rule": "ALL_OR_NOTHING_MULTI",
+      "selected": ["A"],
+      "numericRaw": null,
+      "key": { "correct": ["A", "B"], "numericValue": null, "resolution": null },
+      "expect": { "marks": -1, "status": "INCORRECT" }
+    },
+
+    {
+      "id": "numeric-integer-plain",
+      "rule": "MAIN_NUMERIC",
+      "selected": [],
+      "numericRaw": "25",
+      "key": { "correct": [], "numericValue": "25", "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "numeric-integer-trailing-decimal-zeros",
+      "description": "A candidate typing 25.00 for an integer answer is correct.",
+      "rule": "MAIN_NUMERIC",
+      "selected": [],
+      "numericRaw": "25.00",
+      "key": { "correct": [], "numericValue": "25", "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "numeric-integer-fractional-is-not-truncated-into-correctness",
+      "rule": "MAIN_NUMERIC",
+      "selected": [],
+      "numericRaw": "25.4",
+      "key": { "correct": [], "numericValue": "25", "resolution": null },
+      "expect": { "marks": -1, "status": "INCORRECT" }
+    },
+    {
+      "id": "numeric-devanagari-digits",
+      "description": "Device locale set to Hindi produces Devanagari numerals. NFKC does NOT fold these to ASCII.",
+      "rule": "MAIN_NUMERIC",
+      "selected": [],
+      "numericRaw": "२५",
+      "key": { "correct": [], "numericValue": "25", "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "numeric-tamil-digits",
+      "rule": "MAIN_NUMERIC",
+      "selected": [],
+      "numericRaw": "௨௫",
+      "key": { "correct": [], "numericValue": "25", "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "numeric-bengali-digits",
+      "rule": "MAIN_NUMERIC",
+      "selected": [],
+      "numericRaw": "২৫",
+      "key": { "correct": [], "numericValue": "25", "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "numeric-arabic-indic-digits",
+      "rule": "MAIN_NUMERIC",
+      "selected": [],
+      "numericRaw": "٢٥",
+      "key": { "correct": [], "numericValue": "25", "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "numeric-unicode-minus-sign",
+      "description": "U+2212 MINUS SIGN, not ASCII hyphen-minus.",
+      "rule": "MAIN_NUMERIC",
+      "selected": [],
+      "numericRaw": "−5",
+      "key": { "correct": [], "numericValue": "-5", "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "numeric-en-dash-as-minus",
+      "rule": "MAIN_NUMERIC",
+      "selected": [],
+      "numericRaw": "–5",
+      "key": { "correct": [], "numericValue": "-5", "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "numeric-indian-lakh-grouping",
+      "description": "Comma is a thousands separator in this locale, never a decimal separator.",
+      "rule": "MAIN_NUMERIC",
+      "selected": [],
+      "numericRaw": "1,50,000",
+      "key": { "correct": [], "numericValue": "150000", "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "numeric-surrounding-whitespace",
+      "rule": "MAIN_NUMERIC",
+      "selected": [],
+      "numericRaw": "  25  ",
+      "key": { "correct": [], "numericValue": "25", "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "numeric-unparseable-is-penalised-when-scheme-says-so",
+      "rule": "MAIN_NUMERIC",
+      "selected": [],
+      "numericRaw": "twenty five",
+      "key": { "correct": [], "numericValue": "25", "resolution": null },
+      "expect": { "marks": -1, "status": "UNPARSEABLE" }
+    },
+    {
+      "id": "numeric-fraction-is-unparseable",
+      "rule": "MAIN_NUMERIC",
+      "selected": [],
+      "numericRaw": "1/2",
+      "key": { "correct": [], "numericValue": "25", "resolution": null },
+      "expect": { "marks": -1, "status": "UNPARSEABLE" }
+    },
+    {
+      "id": "numeric-blank-is-unattempted-not-unparseable",
+      "rule": "MAIN_NUMERIC",
+      "selected": [],
+      "numericRaw": null,
+      "key": { "correct": [], "numericValue": "25", "resolution": null },
+      "expect": { "marks": 0, "status": "UNATTEMPTED" }
+    },
+    {
+      "id": "numeric-whitespace-only-is-unattempted",
+      "rule": "MAIN_NUMERIC",
+      "selected": [],
+      "numericRaw": "   ",
+      "key": { "correct": [], "numericValue": "25", "resolution": null },
+      "expect": { "marks": 0, "status": "UNATTEMPTED" }
+    },
+    {
+      "id": "numeric-unparseable-not-penalised-when-scheme-says-so",
+      "rule": "ADV_NUMERIC_2DP_TRUNCATE",
+      "selected": [],
+      "numericRaw": "abc",
+      "key": { "correct": [], "numericValue": "2.56", "resolution": null },
+      "expect": { "marks": 0, "status": "UNPARSEABLE" }
+    },
+
+    {
+      "id": "numeric-truncate-accepts-extra-decimals",
+      "rule": "ADV_NUMERIC_2DP_TRUNCATE",
+      "selected": [],
+      "numericRaw": "2.567",
+      "key": { "correct": [], "numericValue": "2.56", "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "numeric-truncate-rejects-what-rounding-would-accept",
+      "description": "Same input, same key, opposite verdict under TRUNCATE vs HALF_UP. This pair is why the rounding mode is authored per question rather than assumed.",
+      "rule": "ADV_NUMERIC_2DP_TRUNCATE",
+      "selected": [],
+      "numericRaw": "2.567",
+      "key": { "correct": [], "numericValue": "2.57", "resolution": null },
+      "expect": { "marks": 0, "status": "INCORRECT" }
+    },
+    {
+      "id": "numeric-halfup-accepts-what-truncation-would-reject",
+      "rule": "NUMERIC_2DP_HALFUP",
+      "selected": [],
+      "numericRaw": "2.567",
+      "key": { "correct": [], "numericValue": "2.57", "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+
+    {
+      "id": "numeric-tolerance-inside-band",
+      "rule": "NUMERIC_TOLERANCE",
+      "selected": [],
+      "numericRaw": "2.51",
+      "key": { "correct": [], "numericValue": "2.5", "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "numeric-tolerance-boundary-is-inclusive-and-exact",
+      "description": "0.3 - 0.29 in IEEE-754 is 0.010000000000000009, which a float implementation rejects against a 0.01 tolerance. Exact arithmetic accepts it.",
+      "rule": "NUMERIC_TOLERANCE",
+      "selected": [],
+      "numericRaw": "0.29",
+      "key": { "correct": [], "numericValue": "0.3", "resolution": null },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "numeric-tolerance-outside-band",
+      "rule": "NUMERIC_TOLERANCE",
+      "selected": [],
+      "numericRaw": "2.52",
+      "key": { "correct": [], "numericValue": "2.5", "resolution": null },
+      "expect": { "marks": -1, "status": "INCORRECT" }
+    },
+
+    {
+      "id": "resolution-dropped-credits-non-attempter",
+      "description": "DROPPED credits everyone who appeared, attempted or not.",
+      "rule": "MAIN_MCQ",
+      "selected": [],
+      "numericRaw": null,
+      "key": { "correct": ["B"], "numericValue": null, "resolution": "DROPPED" },
+      "expect": { "marks": 4, "status": "DROPPED" }
+    },
+    {
+      "id": "resolution-dropped-credits-wrong-answerer",
+      "rule": "MAIN_MCQ",
+      "selected": ["A"],
+      "numericRaw": null,
+      "key": { "correct": ["B"], "numericValue": null, "resolution": "DROPPED" },
+      "expect": { "marks": 4, "status": "DROPPED" }
+    },
+    {
+      "id": "resolution-all-correct-credits-attempter",
+      "rule": "MAIN_MCQ",
+      "selected": ["A"],
+      "numericRaw": null,
+      "key": { "correct": ["B"], "numericValue": null, "resolution": "ALL_CORRECT" },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "resolution-all-correct-does-not-credit-non-attempter",
+      "description": "The population differs from DROPPED. This distinction is the whole point of having three resolution flags.",
+      "rule": "MAIN_MCQ",
+      "selected": [],
+      "numericRaw": null,
+      "key": { "correct": ["B"], "numericValue": null, "resolution": "ALL_CORRECT" },
+      "expect": { "marks": 0, "status": "UNATTEMPTED" }
+    },
+    {
+      "id": "resolution-multi-key-accepts-first-option",
+      "rule": "MAIN_MCQ",
+      "selected": ["B"],
+      "numericRaw": null,
+      "key": { "correct": ["B", "C"], "numericValue": null, "resolution": "MULTI_KEY" },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "resolution-multi-key-accepts-second-option",
+      "rule": "MAIN_MCQ",
+      "selected": ["C"],
+      "numericRaw": null,
+      "key": { "correct": ["B", "C"], "numericValue": null, "resolution": "MULTI_KEY" },
+      "expect": { "marks": 4, "status": "CORRECT" }
+    },
+    {
+      "id": "resolution-multi-key-still-rejects-an-unaccepted-option",
+      "rule": "MAIN_MCQ",
+      "selected": ["A"],
+      "numericRaw": null,
+      "key": { "correct": ["B", "C"], "numericValue": null, "resolution": "MULTI_KEY" },
+      "expect": { "marks": -1, "status": "INCORRECT" }
+    }
+  ]
+}

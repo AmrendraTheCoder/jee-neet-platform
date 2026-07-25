@@ -1,0 +1,23 @@
+node_modules/
+dist/
+build/
+coverage/
+.turbo/
+*.tsbuildinfo
+
+# env — never commit credentials
+.env
+.env.*
+!.env.example
+
+# supabase local
+supabase/.branches/
+supabase/.temp/
+
+# expo
+.expo/
+apps/mobile/ios/
+apps/mobile/android/
+
+.DS_Store
+*.log

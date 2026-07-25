@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "name": "Practice for JEE and NEET",
+    "slug": "jee-neet-practice",
+    "version": "0.1.0",
+    "orientation": "default",
+    "scheme": "jeeneet",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "assetBundlePatterns": ["assets/**/*"],
+    "plugins": [
+      "expo-router",
+      "expo-sqlite",
+      [
+        "expo-notifications",
+        {
+          "androidMode": "default",
+          "androidCollapsedTitle": "Practice"
+        }
+      ]
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "app.platform.jeeneet.practice"
+    },
+    "android": {
+      "package": "app.platform.jeeneet.practice",
+      "edgeToEdgeEnabled": true
+    },
+    "updates": {
+      "enabled": true,
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 5000
+    },
+    "extra": {
+      "router": {},
+      "apiBaseUrl": "https://api.example.invalid"
+    },
+    "experiments": {
+      "typedRoutes": false
+    }
+  }
+}

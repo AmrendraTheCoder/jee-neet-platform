@@ -1,0 +1,193 @@
+/*
+ * Design tokens.
+ *
+ * Two hard constraints shape everything here.
+ *
+ * 1. FR-A11Y-01: text must remain readable and functional at 200% scale. Every
+ *    length that participates in text layout is in `rem`, so a browser or OS
+ *    text-size increase scales it. Fixed `px` appears only for hairlines and
+ *    for the 44px minimum target floor, which is a physical-input constraint
+ *    and must NOT shrink when text does.
+ *
+ * 2. The palette colours are not decoration. Candidates navigate the real
+ *    examination interface by palette colour and arrive here with that muscle
+ *    memory (FR-ATT-01). The five hues below are fixed semantics, not theme.
+ *    They are tuned per scheme only so that contrast against the surrounding
+ *    surface stays above 4.5:1 in both light and dark.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  /* Type scale, all relative so 200% zoom is linear. */
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.75rem;
+  --text-3xl: 2.25rem;
+  --leading-tight: 1.25;
+  --leading-normal: 1.6;
+
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-8: 3rem;
+
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+
+  /* Physical minimum touch target (FR-A11Y-02). Deliberately not in rem. */
+  --target-min: 44px;
+
+  --border-hairline: 1px;
+
+  /*
+   * Motion. Every transition in the product references one of these two
+   * durations, and both collapse to zero under prefers-reduced-motion
+   * (FR-A11Y-03). Nothing in an examination interface bounces or overshoots:
+   * a moving element during a timed paper is an attention tax.
+   */
+  --motion-fast: 120ms;
+  --motion-slow: 200ms;
+  --motion-ease: cubic-bezier(0.2, 0, 0, 1);
+
+  --z-sticky: 10;
+  --z-dialog: 100;
+}
+
+/* Light scheme (default) */
+:root {
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --surface-sunken: #eef0f4;
+  --surface-raised: #ffffff;
+  --border: #d5d9e0;
+  --border-strong: #aab1bd;
+  --fg: #14171c;
+  --fg-muted: #565f6d;
+  --fg-subtle: #77808f;
+  --accent: #1f4fd8;
+  --accent-fg: #ffffff;
+  --accent-soft: #e6ecfd;
+  --danger: #b3261e;
+  --danger-soft: #fdecea;
+  --warning: #8a5300;
+  --warning-soft: #fdf2df;
+  --success: #146c2e;
+  --success-soft: #e3f4e8;
+  --focus-ring: #1f4fd8;
+  --shadow-raised: 0 1px 2px rgb(16 20 28 / 0.08), 0 4px 12px rgb(16 20 28 / 0.06);
+
+  /* Five-state palette (FR-ATT-01). */
+  --pal-not-visited-bg: #ffffff;
+  --pal-not-visited-fg: #2c313a;
+  --pal-not-visited-border: #8b94a2;
+  --pal-not-answered-bg: #c0392b;
+  --pal-not-answered-fg: #ffffff;
+  --pal-answered-bg: #1e7a3c;
+  --pal-answered-fg: #ffffff;
+  --pal-marked-bg: #6b3fa0;
+  --pal-marked-fg: #ffffff;
+  --pal-answered-marked-bg: #6b3fa0;
+  --pal-answered-marked-fg: #ffffff;
+  --pal-answered-marked-dot: #4ade80;
+  --pal-current-ring: #14171c;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0e1116;
+    --surface: #161b22;
+    --surface-sunken: #0b0e13;
+    --surface-raised: #1c222b;
+    --border: #2b323d;
+    --border-strong: #48515f;
+    --fg: #e7ebf0;
+    --fg-muted: #9aa4b2;
+    --fg-subtle: #7c8695;
+    --accent: #6f9bff;
+    --accent-fg: #0b1020;
+    --accent-soft: #17233f;
+    --danger: #ff8b83;
+    --danger-soft: #331714;
+    --warning: #e8b45c;
+    --warning-soft: #33260f;
+    --success: #6ddb8f;
+    --success-soft: #10281a;
+    --focus-ring: #8fb2ff;
+    --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.5), 0 6px 18px rgb(0 0 0 / 0.35);
+
+    --pal-not-visited-bg: #1c222b;
+    --pal-not-visited-fg: #dbe2ea;
+    --pal-not-visited-border: #6b7484;
+    --pal-not-answered-bg: #e06055;
+    --pal-not-answered-fg: #23100d;
+    --pal-answered-bg: #57c07a;
+    --pal-answered-fg: #06210f;
+    --pal-marked-bg: #a883e0;
+    --pal-marked-fg: #1a0f2b;
+    --pal-answered-marked-bg: #a883e0;
+    --pal-answered-marked-fg: #1a0f2b;
+    --pal-answered-marked-dot: #1e7a3c;
+    --pal-current-ring: #e7ebf0;
+  }
+}
+
+/*
+ * Explicit theme override. The viewer's own toggle must beat the OS signal in
+ * both directions, which media-query-only theming cannot do.
+ */
+:root[data-theme='light'] {
+  color-scheme: light;
+}
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --bg: #0e1116;
+  --surface: #161b22;
+  --surface-sunken: #0b0e13;
+  --surface-raised: #1c222b;
+  --border: #2b323d;
+  --border-strong: #48515f;
+  --fg: #e7ebf0;
+  --fg-muted: #9aa4b2;
+  --fg-subtle: #7c8695;
+  --accent: #6f9bff;
+  --accent-fg: #0b1020;
+  --accent-soft: #17233f;
+  --danger: #ff8b83;
+  --danger-soft: #331714;
+  --warning: #e8b45c;
+  --warning-soft: #33260f;
+  --success: #6ddb8f;
+  --success-soft: #10281a;
+  --focus-ring: #8fb2ff;
+  --shadow-raised: 0 1px 2px rgb(0 0 0 / 0.5), 0 6px 18px rgb(0 0 0 / 0.35);
+  --pal-not-visited-bg: #1c222b;
+  --pal-not-visited-fg: #dbe2ea;
+  --pal-not-visited-border: #6b7484;
+  --pal-not-answered-bg: #e06055;
+  --pal-not-answered-fg: #23100d;
+  --pal-answered-bg: #57c07a;
+  --pal-answered-fg: #06210f;
+  --pal-marked-bg: #a883e0;
+  --pal-marked-fg: #1a0f2b;
+  --pal-answered-marked-bg: #a883e0;
+  --pal-answered-marked-fg: #1a0f2b;
+  --pal-answered-marked-dot: #1e7a3c;
+  --pal-current-ring: #e7ebf0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-fast: 0ms;
+    --motion-slow: 0ms;
+  }
+}

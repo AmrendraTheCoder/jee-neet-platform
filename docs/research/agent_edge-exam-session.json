@@ -1,0 +1,509 @@
+{
+ "area": "Timed exam session (mock test attempt lifecycle): timer authority, network resilience, resume/session continuity, answer durability, scoring/re-scoring, randomisation determinism, fairness/leaderboard integrity, and in-attempt notes \u2014 for a React Native + Expo JEE/NEET app on Supabase + Redis at 10k concurrent attempts",
+ "cases": [
+  {
+   "id": "EC-TIMER-01",
+   "scenario": "Student backgrounds the app, sets device date/time back 45 min (or forward to skip a cooldown), returns. Android Settings > Date & time > auto-time OFF; iOS Settings > General > Date & Time > Set Automatically OFF. Also covers rooted/jailbroken devices and Android emulators with `adb shell date`.",
+   "failureMode": "A client-computed countdown from Date.now() grants unlimited extra time; a client-computed 'deadline passed' check can also be dodged so the attempt never auto-submits. Any client-trusted timestamp on the answer row lets a student backdate submissions to inside the window.",
+   "mitigation": "Never derive remaining time from wall clock on the client. On attempt creation the server writes an immutable `deadline_at timestamptz` on the attempt row computed as `min(started_at + test.duration, test.window_close_at)` using Postgres `clock_timestamp()` inside the RPC \u2014 mirroring Moodle's `get_due_date()` = min(timestart+timelimit, timeclose). Client renders `remaining = deadline_at - server_now_estimate`, where `server_now_estimate = last_server_now + (monotonic_now - monotonic_at_sync)`; monotonic source is elapsedRealtimeNanos on Android / CLOCK_MONOTONIC_RAW+mach_continuous_time on iOS, never Date.now() (exact API semantics unverified from primary docs \u2014 confirm elapsedRealtime resets on reboot but is immune to user clock changes before shipping). Heartbeat edge function every 30s returns `{server_now, deadline_at, seconds_left}`; client hard-snaps to server value whenever |drift| > 2s. Server rejects any answer whose arrival time > deadline_at + grace. Strip all client-supplied timestamps at the API boundary; `answered_at` is set by `default now()` in Postgres. Flag `abs(client_reported_now - server_now) > 120s` into a `clock_anomaly` column for admin review rather than blocking (honest skew exists).",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-TIMER-02",
+   "scenario": "Honest clock skew: a budget Android device with no NTP sync is 3\u20138 minutes off UTC. Student's timer and the server's deadline disagree.",
+   "failureMode": "Timer shows 04:12 remaining while the server has already closed the attempt, or shows 00:00 while 6 minutes remain \u2014 student panics, mass-submits blank, or reports the app 'stole' time. Also breaks JWT validation if the device rejects a valid token as not-yet-valid.",
+   "mitigation": "Two-clock model: authoritative `deadline_at` on the server, display driven by monotonic elapsed time anchored to the last heartbeat. Compute offset with an NTP-style round-trip: `offset = server_now - (t_send + rtt/2)`, keep an EWMA of the last 5 samples, discard samples with rtt > 2s. Show a subtle 'synced Xs ago' indicator. For JWT, allow the documented clock-skew leeway \u2014 RFC 7519 says implementers MAY allow leeway 'usually no more than a few minutes' for exp/nbf \u2014 and validate exclusively server-side; the client must never gate on local exp.",
+   "severity": "high",
+   "layer": "client"
+  },
+  {
+   "id": "EC-TIMER-03",
+   "scenario": "Timezone changes mid-attempt: student travels (Kolkata to Dubai), crosses a network TZ boundary near a border, uses a VPN that changes auto-TZ, or manually switches TZ to game a 'live test opens at 09:00 local' rule.",
+   "failureMode": "Any naive `timestamp without time zone` column shifts by hours; UI shows the test as not-yet-open or already-closed; a 'today's daily streak' resets or double-counts; a live test's countdown jumps 3.5 hours.",
+   "mitigation": "All exam columns are `timestamptz` (stored UTC); DB `timezone = 'UTC'`; the client formats to Asia/Kolkata for display only, and for live/scheduled tests it renders the fixed exam timezone label ('09:00 IST') rather than device-local time. Never send local-time strings to the API. Duration arithmetic uses interval seconds, not calendar dates. Streak/day-boundary logic uses a single declared `exam_timezone = 'Asia/Kolkata'` via `(now() AT TIME ZONE 'Asia/Kolkata')::date`, not device locale.",
+   "severity": "high",
+   "layer": "db"
+  },
+  {
+   "id": "EC-TIMER-04",
+   "scenario": "DST / leap-second edge: India has no DST so IST is stable at UTC+05:30, but NRI/Gulf/US-based aspirants and any server or third-party service running local time do observe DST; separately a leap-second smear or an NTP step is applied to the server fleet mid-window.",
+   "failureMode": "A 3-hour attempt spanning a DST 'fall back' computed in local time gains or loses 60 minutes. Under Google's smear, servers on smeared NTP disagree with servers on non-smeared NTP by up to ~0.5s, so two API nodes disagree on whether a submission is late.",
+   "mitigation": "Never do date arithmetic in a local zone. Additionally, do not compute the deadline as an offset re-derived on each request \u2014 persist the absolute `deadline_at` once at attempt start so no later clock policy change can move it. Pin all backend nodes to the same NTP policy (Google's 24-hour linear leap smear from noon-to-noon UTC, ~11.6 ppm slew, diverging up to just under 0.5s from UTC) and never mix smeared and non-smeared sources. Apply a fixed 5s server-side ingress tolerance on the deadline so sub-second fleet disagreement can never decide an attempt.",
+   "severity": "medium",
+   "layer": "infra"
+  },
+  {
+   "id": "EC-TIMER-05",
+   "scenario": "App backgrounded mid-test: student checks a WhatsApp message, pulls the notification shade, opens the calculator, or hits the app switcher. RN AppState goes `inactive` (iOS transition/incoming call/multitasking view) then `background`; Android fires `blur` without changing AppState when the notification drawer is pulled.",
+   "failureMode": "JS timers are throttled or frozen while backgrounded; on return the countdown shows the time it had when backgrounded, so the student believes they have more time than they do and the UI jumps by minutes on resume. Unsynced answers sit in memory.",
+   "mitigation": "Subscribe to `AppState.addEventListener('change')`. On `inactive`/`background`: flush the pending-answer queue immediately, record `background_started_at` (monotonic), and register an iOS `beginBackgroundTask(withName:expirationHandler:)` for the flush \u2014 iOS grants roughly 30 seconds and force-terminates the app if `endBackgroundTask` is never called. On return to `active`: force an immediate heartbeat before painting the timer, and animate the correction rather than snapping. Log every background episode to an `attempt_focus_events` table (duration, reason) \u2014 this is both the audit trail for disputes and the anti-cheat signal. Never reconstruct elapsed time from JS setInterval ticks across a background episode.",
+   "severity": "critical",
+   "layer": "client"
+  },
+  {
+   "id": "EC-TIMER-06",
+   "scenario": "OS terminates the app: iOS jetsam kills a memory-heavy RN app rendering 90 LaTeX-laden questions plus full-resolution question images; Android low-memory killer does the same on a 3GB device. No JS lifecycle callback fires reliably.",
+   "failureMode": "Everything held only in Redux/Zustand memory is lost \u2014 the last 40 seconds of answers, the mark-for-review flags, the note the student typed. On relaunch the app has no idea an attempt was open.",
+   "mitigation": "Treat memory as a cache and expo-sqlite (WAL journal mode, `PRAGMA journal_mode = WAL`) as the source of truth for in-flight attempt state. Every answer/flag mutation is a synchronous local write inside `withExclusiveTransactionAsync` BEFORE the optimistic UI update and before the network call; expo-sqlite persists across app restarts. Keep the attempt id in MMKV so cold start can detect 'attempt in progress' before any network call. Cap memory: virtualise the question list, lazy-load images with an explicit LRU disk cache, unmount off-screen KaTeX renders. Instrument iOS `AppState` `memoryWarning` to pre-emptively flush and drop image caches.",
+   "severity": "critical",
+   "layer": "client"
+  },
+  {
+   "id": "EC-TIMER-07",
+   "scenario": "Phone reboots, battery hits 0%, or the device thermally shuts down 100 minutes into a 180-minute JEE Advanced mock. Student borrows a charger and relaunches 12 minutes later.",
+   "failureMode": "Naive design: attempt state lost entirely \u2192 unrecoverable trust event. Second failure: a monotonic clock anchored on boot-time resets to zero on reboot, so an elapsedRealtime-based timer thinks no time has passed and hands the student 12 free minutes.",
+   "mitigation": "On cold start, read the open attempt from SQLite, then call `resume_attempt(attempt_id)` which returns the server-authoritative `deadline_at` and the full server-side answer set. Merge server answers with local unsynced answers by `(question_id, client_seq)` last-writer-wins on a per-question monotonic counter, never on wall clock. Persist a `boot_id` alongside the monotonic anchor; if `boot_id` changed, discard the monotonic anchor entirely and treat the next heartbeat as the only truth. The 12 lost minutes are real and are NOT refunded automatically \u2014 that is the exam contract, stated in the pre-attempt consent screen \u2014 but the outage is logged so admin can grant compensatory time (see EC-FAIR-07).",
+   "severity": "critical",
+   "layer": "client"
+  },
+  {
+   "id": "EC-TIMER-08",
+   "scenario": "Incoming voice call, an alarm, a full-screen intent notification, or an OTP autofill overlay interrupts the attempt. On iOS this drives AppState `inactive`; a call can hold the app inactive for minutes.",
+   "failureMode": "Timer visually freezes during `inactive` on iOS, then jumps. Autofill on Android counts as another Activity and moves AppState to `background`, tripping a naive anti-cheat rule that voids the attempt.",
+   "mitigation": "Treat `inactive` distinctly from `background`: `inactive` alone never triggers anti-cheat and never pauses the server deadline. Anti-cheat counts only sustained `background` episodes > 5s, and the policy is 'log and surface', not 'auto-void'. Keep the deadline running (server-authoritative) but present a non-blocking 'you were away 03:12' banner on return so the time jump is explained rather than mysterious. Use `expo-keep-awake` for the duration of the attempt to prevent screen-lock-induced backgrounding.",
+   "severity": "medium",
+   "layer": "client"
+  },
+  {
+   "id": "EC-TIMER-09",
+   "scenario": "Timer drift accumulated over a 180-minute attempt from `setInterval(fn, 1000)` on a busy JS thread, plus RN bridge/JSI congestion during LaTeX re-renders and image decodes.",
+   "failureMode": "setInterval fires late under load; naive `remaining -= 1` per tick accumulates 30\u2013120 seconds of drift over 3 hours. Student sees 00:00 while the server still allows input, or the reverse \u2014 and the two students on the same test disagree about their remaining time.",
+   "mitigation": "Never decrement a counter. Recompute every frame/second as `remaining = deadline_monotonic_anchor - monotonicNow()` so drift cannot accumulate. Recalibrate `deadline_monotonic_anchor` on every 30s heartbeat and on every AppState `active` transition. Run the countdown on the UI thread via Reanimated worklets so a blocked JS thread cannot stall the visible clock. Add a client assertion: if a single tick advances more than 5s of wall time, force an immediate heartbeat.",
+   "severity": "high",
+   "layer": "client"
+  },
+  {
+   "id": "EC-TIMER-10",
+   "scenario": "Sectioned paper (JEE Main: Physics/Chemistry/Maths; NEET: Physics/Chemistry/Botany/Zoology) where the admin configures per-section time limits and 'no going back to a submitted section', combined with an overall 180-minute cap.",
+   "failureMode": "Two independent deadlines drift apart: a student finishes Section A early, banks 12 minutes, and a client-only implementation lets them spend it in Section B when policy forbids it \u2014 or the overall deadline fires while a section timer still shows time, producing a mid-section forced submit with no explanation.",
+   "mitigation": "Model deadlines as a set of rows: `attempt_section(attempt_id, section_id, opened_at, section_deadline_at, locked_at, sequence)`. The effective hard stop is `least(section_deadline_at, attempt.deadline_at)`; the UI must always display which constraint is binding. Section transition is a server RPC that atomically stamps `locked_at` on the outgoing section and `opened_at`/`section_deadline_at` on the incoming one, inside one transaction with `SELECT ... FOR UPDATE` on the attempt row. Time banking is an explicit boolean on the test config (`carry_forward_unused_section_time`), default false, enforced server-side.",
+   "severity": "high",
+   "layer": "api"
+  },
+  {
+   "id": "EC-NET-01",
+   "scenario": "Student taps 'Start Test' with no connectivity (tier-2/tier-3 India, hostel dead zone, exhausted daily data cap). The app has cached question content from a prior prefetch.",
+   "failureMode": "If the app starts a local attempt with a locally-invented start time, the server later has no authoritative `deadline_at` and the student can restart the app repeatedly to get fresh timers, or genuinely completes 3 hours of work the server refuses to accept.",
+   "mitigation": "Hard rule: an attempt cannot begin without a server-issued attempt row. Gate the Start button on a successful `start_attempt` RPC that returns `{attempt_id, deadline_at, server_now, question_manifest, shuffle_seed}` \u2014 one round trip, sub-2KB. Offer explicit 'Download test for offline attempt' as a separate pre-authorised flow: the server pre-issues an attempt row with `deadline_at = null` and `offline_token_expires_at`, and the deadline starts on the first heartbeat after going online, with total offline elapsed time capped at the paper duration. Practice mode (untimed, unranked) is fully offline-capable; ranked mock tests are not.",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-NET-02",
+   "scenario": "Connectivity drops at minute 40 and does not return for 25 minutes. Student keeps answering.",
+   "failureMode": "Every answer PATCH fails; a naive implementation shows 25 error toasts, or silently discards answers, or blocks the UI. On reconnect an unordered burst overwrites newer answers with older ones.",
+   "mitigation": "Offline-first write path: each answer mutation writes to a local `pending_ops` table in expo-sqlite with `(attempt_id, question_id, payload, client_seq monotonic int, idempotency_key uuid4, created_at)`. TanStack Query with `onlineManager` + persisted paused mutations drains the queue on reconnect in FIFO order; because a paused mutation's function is not serialised, you MUST register `queryClient.setMutationDefaults(['saveAnswer'], {mutationFn, retry})` before hydration or `resumePausedMutations()` fails with 'No mutationFn found'. UI shows a single persistent 'N answers pending sync' chip, never per-answer errors. Server upsert is `ON CONFLICT (attempt_id, question_id) DO UPDATE ... WHERE excluded.client_seq > answers.client_seq` so out-of-order arrivals are dropped, not applied.",
+   "severity": "critical",
+   "layer": "client"
+  },
+  {
+   "id": "EC-NET-03",
+   "scenario": "Flapping connectivity: a train/metro commute or a congested tower toggles online/offline every 10\u201330 seconds. NetInfo reports `isConnected: true` while `isInternetReachable` is false or null.",
+   "failureMode": "The sync queue restarts mid-drain repeatedly, re-sending the same mutation and multiplying server load; heartbeats fire in bursts; the 'pending' chip flickers; battery burns. At 10k students a flap storm becomes a self-inflicted DDoS.",
+   "mitigation": "Gate all network work on `isInternetReachable === true`, not `isConnected`. Single-flight the drain with a local mutex so only one drain loop runs. Exponential backoff with full jitter: `delay = random(0, min(30s, base * 2^attempt))`, base 500ms, and honour `Retry-After` on 429/503. Debounce online transitions by 1500ms before resuming. Coalesce answer writes: batch up to 50 pending ops into one `sync_answers` RPC call rather than one request per answer. Heartbeat and sync ride the same request so a flapping client makes at most one request per interval.",
+   "severity": "high",
+   "layer": "client"
+  },
+  {
+   "id": "EC-NET-04",
+   "scenario": "Slow 2G/EDGE: 300\u20131500ms RTT, frequent 30s+ stalls. The final 'Submit Test' request is issued at T-20s and the response has not returned when the timer hits zero.",
+   "failureMode": "Student sees a spinner past 00:00, force-closes the app assuming it hung, and the submission is in an unknown state. Or the client times out and retries, creating a second submission.",
+   "mitigation": "Submission is a two-phase, idempotent operation. Phase 1: the client has already streamed every answer, so 'submit' carries no answer payload \u2014 only `{attempt_id, idempotency_key}`. Phase 2: `finalize_attempt` is idempotent on `attempt.status`; a second call with the same key returns the same result (Stripe's model: keys retained 24h, reusing a key with different parameters errors out; generate v4 UUIDs, \u2264255 chars). Client request timeout 20s with 3 idempotent retries. Critically, submission is not required for correctness: a server-side sweeper finalises the attempt at `deadline_at` regardless (see EC-NET-08), so a failed submit degrades to auto-submit, never to data loss. Show 'Your answers are saved on our servers. Submitting\u2026' copy so the student knows closing the app is safe.",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-NET-05",
+   "scenario": "Duplicate submission: user double-taps Submit; or the client retries a request whose 200 response was lost; or two devices both submit (see EC-SESSION-02).",
+   "failureMode": "Two `attempt_result` rows, double coin/streak award, two leaderboard entries for one student, scoring job runs twice and doubles the score.",
+   "mitigation": "(a) `finalize_attempt` takes an `idempotency_key`; an `idempotency_keys(key pk, attempt_id, request_hash, response jsonb, created_at)` table with a 24h TTL returns the cached response on replay and 409s on the same key with a different request hash. (b) State-machine guard inside a transaction: `UPDATE attempts SET status='submitted' WHERE id=$1 AND status='in_progress' RETURNING *` \u2014 zero rows means already submitted, return the existing result rather than erroring. (c) `CREATE UNIQUE INDEX one_result_per_attempt ON attempt_results(attempt_id)`. (d) Rewards are granted by a separate transactional outbox keyed on `attempt_id`, with `CREATE UNIQUE INDEX ON coin_ledger(attempt_id, reason)` so double-award is structurally impossible.",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-NET-06",
+   "scenario": "Out-of-order answer sync: student answers Q17 as option B, changes to option D, goes offline, changes to option A. Reconnect fires three queued writes; HTTP/2 multiplexing plus retry backoff delivers them B, A, D.",
+   "failureMode": "The stored answer is D \u2014 a value the student explicitly abandoned. Silent, undetectable, and directly costs marks.",
+   "mitigation": "Per-attempt monotonic `client_seq` (a counter persisted in SQLite, incremented in the same transaction as the local write \u2014 never a timestamp, since device clocks are hostile). Server upsert applies only if `excluded.client_seq > answers.client_seq`; stale writes are accepted with HTTP 200 and a `{applied:false, reason:'stale_seq'}` body so the client stops retrying. Drain the queue strictly serially per attempt (concurrency 1) as a second line of defence \u2014 TanStack's paused mutations already preserve order. Keep an append-only `answer_events` audit table (attempt_id, question_id, value, client_seq, received_at) so any dispute can be reconstructed.",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-NET-07",
+   "scenario": "Buffered answers arrive after the server-side deadline: student was offline from T-6min, answered 4 more questions, reconnects at T+90s and the queue drains.",
+   "failureMode": "Naive strict rejection loses 4 legitimately-answered questions and enrages the student. Naive acceptance lets anyone go offline at T-1s, answer everything at leisure, and sync an hour later \u2014 a total integrity break.",
+   "mitigation": "Adopt Moodle's model explicitly, with a configurable `overdue_handling` per test taking Moodle's three values: `autosubmit` (default in Moodle: 'Open attempts are submitted automatically'), `graceperiod` ('There is a grace period when open attempts can be submitted, but no more questions answered'), `autoabandon` ('Attempts must be submitted before time expires, or they are not counted'). Accept a late write ONLY if the client-attested `answered_at_monotonic_offset` places it before `deadline_at` AND the write arrives within an ingress grace of 120s (Moodle's `graceperiodmin` default is 60s). Beyond that, store into `late_answers` with `applied=false` and surface it to the student and to admin \u2014 visible, appealable, not scored. Cap total accepted-late answers per attempt (e.g. 10) to bound abuse, and rate-limit accounts with repeated offline-at-deadline patterns.",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-NET-08",
+   "scenario": "The timer reaches zero while the device is offline, or the app was killed 40 minutes before the deadline and never relaunched. Nobody ever calls submit.",
+   "failureMode": "The attempt sits `in_progress` forever: it never appears in results, blocks the 'one active attempt' rule so the student cannot start another test, never enters the leaderboard, and pollutes analytics.",
+   "mitigation": "A server-side sweeper is the only reliable finaliser \u2014 mirror Moodle's `\\mod_quiz\\task\\update_overdue_attempts` cron, which selects attempts `WHERE state IN ('inprogress','overdue') AND timecheckstate <= :processto` with `processto = timenow - graceperiodmin`. Implement with Supabase Cron (pg_cron; supports schedules down to every second, but keep \u22648 concurrent jobs and each job <10 min per Supabase's guidance) running every 30s: `SELECT id FROM attempts WHERE status='in_progress' AND deadline_at < now() - interval '120 seconds' ORDER BY deadline_at LIMIT 500 FOR UPDATE SKIP LOCKED`, then enqueue each into pgmq/Supabase Queues for scoring. `SKIP LOCKED` makes the sweeper safely horizontally scalable. Keep a `timecheck_at` column so the sweep query is index-driven, not a full scan of a table with millions of attempts.",
+   "severity": "critical",
+   "layer": "db"
+  },
+  {
+   "id": "EC-NET-09",
+   "scenario": "Thundering herd: a scheduled live mock for 10,000 students starts at 14:00 IST and ends at 17:00 IST. Nearly all clients submit within a 60-second window at the end, and all fetch the paper within a 90-second window at the start.",
+   "failureMode": "Connection exhaustion and 5xx storms exactly when submissions are most valuable. Supabase compute tiers cap direct Postgres connections (Large = 160 direct / 800 pooler clients; even 16XL = 500 direct / 12,000 pooler clients), and Realtime concurrent connections cap at 200 on Free, 500 on Pro with spend cap, 10,000 on Pro-no-spend-cap/Team. 10k live clients on Realtime is at the ceiling of the Team plan.",
+   "mitigation": "(a) Never open a direct Postgres connection per client \u2014 all traffic goes through PostgREST/Edge Functions using Supavisor transaction mode (port 6543), which is documented as the right choice for 'serverless or edge functions, which require many transient connections'. (b) Because answers are streamed continuously, the end-of-test spike carries almost no payload; make `finalize_attempt` an O(1) status flip and push scoring to pgmq consumers. (c) Jitter the sweeper and the client's final auto-submit by `random(0, 45s)`. (d) Do NOT use Realtime for the timer \u2014 use HTTP heartbeats, which are cacheable and stateless; reserve Realtime for the live leaderboard and cap it via a single broadcast channel with server-side fan-out (broadcast payload cap 256KB Free / 3000KB paid; \u2264100 channels per connection; 2,500 msgs/sec on Team). (e) Pre-warm: prefetch the question manifest and all images to device 30 minutes before start via a signed manifest, so 14:00 is not also an image-CDN spike.",
+   "severity": "critical",
+   "layer": "infra"
+  },
+  {
+   "id": "EC-NET-10",
+   "scenario": "Captive portal or ISP interception (hostel wifi, railway wifi, some Indian ISPs' DNS hijack pages) returns HTTP 200 with an HTML login page in response to an API call.",
+   "failureMode": "The client parses HTML as JSON, throws, and either shows a nonsense error or \u2014 worse \u2014 treats the mutation as failed and retries forever while the student believes answers are saving. `NetInfo.isConnected` is true, so offline UI never appears.",
+   "mitigation": "Validate `Content-Type: application/json` and a signed response envelope on every API response; anything else is classified as `CAPTIVE_PORTAL`, not `SERVER_ERROR`. Use `NetInfo.isInternetReachable` (which does a real reachability probe) rather than `isConnected`. On detection, show a distinct 'Your network requires sign-in \u2014 your answers are saved on this device' state and keep queueing locally. Pin the API to HTTPS with certificate validation so an intercepting proxy cannot silently MITM answer traffic.",
+   "severity": "medium",
+   "layer": "client"
+  },
+  {
+   "id": "EC-SESSION-01",
+   "scenario": "Student starts on an Android phone, the phone dies, and they resume on a sibling's iPhone (or a tablet) 15 minutes later.",
+   "failureMode": "Wrong behaviours: (a) app creates a brand new attempt with a fresh 3-hour timer; (b) app shows a blank paper because answers were only ever in local SQLite; (c) the question order differs on device 2, so the student's mental map of 'Q34 was the tough integral' breaks and mark-for-review flags point at wrong questions.",
+   "mitigation": "Attempt state lives server-side and is device-agnostic. On login, `GET /attempts?status=in_progress` returns the open attempt; the app routes straight into it. `resume_attempt` returns the full server answer set plus `shuffle_seed` and `question_order[]` \u2014 the order is persisted as an ordered array on the attempt row at creation, so it is identical everywhere (see EC-RAND-01). `deadline_at` is unchanged: the 15 minutes are lost, and that is stated up front. Locally-queued answers from device 1 are gone unless they synced \u2014 which is why answers flush every 10s and on every AppState transition, matching Moodle's `quiz/autosaveperiod` default of 60 seconds but tighter for a mobile network.",
+   "severity": "high",
+   "layer": "api"
+  },
+  {
+   "id": "EC-SESSION-02",
+   "scenario": "Two devices in the same attempt simultaneously \u2014 either innocent (student opens the app on a tablet forgetting the phone is mid-test) or malicious (a friend on a second device answers half the paper in parallel).",
+   "failureMode": "Two clients race on the same `(attempt_id, question_id)`; last-writer-wins by seq means device B's counter is independent of device A's and can permanently mask A's newer answers. Two auto-submits fire. Collusion is undetectable.",
+   "mitigation": "Issue a `session_token uuid` on `start_attempt`/`resume_attempt` and store `attempts.active_session_token` plus `active_device_id`. Every answer/heartbeat request carries the token; the server rejects with 409 `SESSION_SUPERSEDED` if it does not match, and the losing client immediately locks into a read-only 'This test was resumed on another device' screen. Resuming from a new device is an explicit, confirmed takeover that rotates the token \u2014 that makes takeover single-writer by construction. Change `client_seq` to a server-assigned `LWW` using a per-attempt Postgres sequence bumped inside the upsert so counters cannot collide across devices. Record every takeover in `attempt_device_events` and surface `device_switch_count` on the admin analytics view as an integrity signal. Optionally use Realtime Presence on a per-attempt channel to detect concurrency in real time (note the documented limit of 5 presence calls per client per 30s, and that presence sync can emit spurious join/leave during reconciliation).",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-SESSION-03",
+   "scenario": "JWT expires mid-attempt. Supabase's default access token lifetime is 1 hour, so a 180-minute JEE Advanced mock spans at least two refreshes. A refresh fires while the device is offline or on 2G.",
+   "failureMode": "Every answer write starts returning 401. A naive client redirects to the login screen and destroys the in-memory attempt; or the queued mutations all fail permanently and drain into the void; or the student is asked to type a password at minute 95 of an exam.",
+   "mitigation": "(a) Enable `autoRefreshToken` and pre-emptively refresh at 50% of TTL (30 min), not at expiry, and always immediately before the final submit. (b) Pause auto-refresh while AppState is `background` and force a refresh on return to `active` \u2014 Supabase refresh tokens are single-use with a documented 10-second reuse interval, so overlapping refreshes from a resumed queue can revoke the session. (c) Never navigate away from an active attempt on 401: hold the UI, retry refresh with backoff, keep writing to local SQLite. (d) Make the answer-sync endpoint tolerate a short 401 window by queueing rather than discarding. (e) As a break-glass path, `start_attempt` also returns a narrow-scope `attempt_write_token` (JWT, aud=`attempt:write`, exp = `deadline_at + 15min`, claims limited to that one attempt_id) that the answer-sync Edge Function accepts independently of the user session \u2014 so even a fully broken auth session cannot cost a student their paper. Validate this token in the Edge Function and let it bypass RLS via a `security definer` function scoped to the single attempt.",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-SESSION-04",
+   "scenario": "Student tries to resume after the test window has closed \u2014 e.g. a weekend-long window test where the paper's `window_close_at` passes while their attempt is still `in_progress`, or they open the app three days later.",
+   "failureMode": "Either the app lets them continue (integrity break: unlimited time) or it shows a raw error and the attempt stays `in_progress` forever, blocking new attempts.",
+   "mitigation": "The effective deadline is already `min(started_at + duration, test.window_close_at)` at attempt creation, so window close is enforced by the same mechanism. The sweeper (EC-NET-08) will have finalised the attempt long before the student returns; on resume the app finds `status='submitted'` and routes to the result screen with an explanatory banner ('Auto-submitted at 21:00 on 14 Aug \u2014 window closed'). Distinguish `submitted` vs `abandoned` (Moodle's `stateabandoned` = 'Never submitted') so an attempt with zero answers is reported as not-counted rather than as a 0% score that tanks the student's visible average.",
+   "severity": "high",
+   "layer": "api"
+  },
+  {
+   "id": "EC-SESSION-05",
+   "scenario": "Refresh-token rotation race: two threads (the sync drain and the heartbeat) both hit an expired access token and both POST the same refresh token; or the app is restored from an iOS backup carrying a stale refresh token; or the project has 'single session per user' enabled and the student logs in on a second device.",
+   "failureMode": "Supabase treats reuse outside the 10s interval as compromise \u2014 'the whole session is regarded as terminated and all refresh tokens belonging to it are marked as revoked'. The student is hard-logged-out mid-exam.",
+   "mitigation": "Single-flight the refresh: one shared in-flight promise guarded by a mutex; all callers await it (supabase-js does this internally but a custom fetch wrapper can defeat it \u2014 do not roll your own). Do not enable 'single session per user' for student accounts during exam windows, or exempt attempt-scoped tokens from it. Persist the session in `expo-secure-store`, and clear it on restore-from-backup by keying the store entry to an install-scoped UUID. Combine with the attempt-scoped write token (EC-SESSION-03) so a revoked session degrades to 'you must log in again after submitting' rather than losing the paper.",
+   "severity": "high",
+   "layer": "api"
+  },
+  {
+   "id": "EC-SESSION-06",
+   "scenario": "An OTA update (expo-updates / EAS Update) downloads and the app reloads mid-attempt; or a store update installs; or the student force-quits during a JS bundle reload.",
+   "failureMode": "The JS context is torn down and rebuilt; in-memory attempt state and any un-flushed answers are lost; the new bundle may have a different local DB schema and fail to read the pending queue.",
+   "mitigation": "Set `checkAutomatically: 'ON_ERROR_RECOVERY'` or gate `Updates.reloadAsync()` behind an explicit 'no attempt in progress' guard \u2014 never reload while `attempt.status === 'in_progress'`. Version the local SQLite schema and run migrations forward-only on cold start before reading `pending_ops`; never drop the pending table on migration. Keep `pending_ops.payload` as opaque JSON so schema evolution cannot orphan queued writes. Ship a server-side `min_supported_client_version` on the attempt manifest; if the client is below it, block starting a NEW attempt but always allow resuming/submitting an existing one.",
+   "severity": "medium",
+   "layer": "client"
+  },
+  {
+   "id": "EC-DATA-01",
+   "scenario": "Partial answer save: a batched `sync_answers` call carrying 40 answers is cut off mid-write, or an Edge Function hits the documented 2-second CPU limit (256MB memory, 150s free / 400s paid wall clock, 150s idle timeout \u2192 504) while writing.",
+   "failureMode": "22 of 40 answers land, 18 do not; the client marks the whole batch synced on a partial 2xx and permanently loses 18 answers, or marks the whole batch unsynced and re-sends 22 already-applied writes.",
+   "mitigation": "Make the batch write atomic in a single Postgres transaction inside a `security definer` RPC (`sync_answers(attempt_id, ops jsonb[])` doing one `INSERT ... ON CONFLICT DO UPDATE ... FROM jsonb_to_recordset`) so it is all-or-nothing. Return a per-op result array `[{client_seq, applied, reason}]`; the client only clears local ops whose `client_seq` is acknowledged. Cap batch size at 50 ops and keep the RPC well inside the 2s CPU ceiling by avoiding per-row round trips. On 504/timeout, retry with the same idempotency key \u2014 the upsert is naturally idempotent under the `client_seq` guard.",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-DATA-02",
+   "scenario": "Answers are saved but the scoring job crashes: an OOM in a scoring worker, a deploy mid-batch, a null-pointer on a question whose answer key is missing, or a poison message that fails every retry.",
+   "failureMode": "The attempt is `submitted` with no `attempt_result` row. The student sees an infinite 'Calculating your score\u2026' spinner. If scoring is fire-and-forget from the submit handler, the work is simply gone.",
+   "mitigation": "Decouple submission from scoring. `finalize_attempt` only flips status and enqueues a pgmq message (Supabase Queues: 'delivered exactly once to a consumer within a customizable visibility window'; messages are durable Postgres rows). Set visibility timeout to ~3\u00d7 p99 scoring time. Workers `archive()` on success rather than delete, giving an audit trail. Track `read_ct` and route messages exceeding 5 reads to a `scoring_dlq` with an admin alert. Scoring must be a pure, idempotent function of `(attempt_id, answer_key_version)` writing through `INSERT ... ON CONFLICT (attempt_id, answer_key_version) DO UPDATE`, so replay is always safe. A pg_cron reconciler every 5 minutes finds `attempts WHERE status='submitted' AND NOT EXISTS (result) AND submitted_at < now()-interval '3 minutes'` and re-enqueues. UI shows 'Score being computed' with an ETA, never a bare spinner.",
+   "severity": "critical",
+   "layer": "infra"
+  },
+  {
+   "id": "EC-DATA-03",
+   "scenario": "Answer key correction after results are published \u2014 the single most consequential fairness event. Real precedent: NTA revised the NEET (UG) 2024 answer key and issued re-revised scorecards/ranks on 26 July 2024 following the Supreme Court order dated 23 July 2024 in W.P.(Civil) No. 335/2024, for a cohort of 23,33,297 candidates who appeared.",
+   "failureMode": "Naive fix: UPDATE the key row in place. Every existing score is now silently wrong, historical analytics are corrupted, leaderboards are inconsistent with stored scores, coins/rewards already paid out on the old ranking are unrecoverable, and there is no way to explain to a student why their score changed.",
+   "mitigation": "Answer keys are immutable, versioned rows: `answer_keys(question_id, version int, correct_option[], marking_scheme jsonb, effective_from, authored_by, reason text)`, unique on `(question_id, version)`. `attempt_results` stores `answer_key_version_map jsonb` (or a single `key_snapshot_id`) so every score is reproducible. A correction creates version N+1 and enqueues a `rescore_test(test_id, from_version, to_version)` job that recomputes every affected attempt into a NEW `attempt_results` row (never overwriting), then atomically swaps the published result pointer and recomputes ranks in one transaction. Emit a `score_revision` record per affected student and push a notification with a before/after breakdown. Rewards use a compensating-entry ledger: never claw back coins, only top up \u2014 clawback is a trust event worse than the original error.",
+   "severity": "critical",
+   "layer": "product"
+  },
+  {
+   "id": "EC-DATA-04",
+   "scenario": "Admin edits or deletes a question after attempts exist \u2014 fixes a typo in the stem, replaces a blurry image, changes an option, or deletes the question entirely mid-window while 400 students are attempting it.",
+   "failureMode": "Students who attempted before and after the edit answered materially different questions but are ranked together. If the question row is hard-deleted, every referencing `answers` row FK-cascades away and attempts silently lose questions. If an option's text changes but the option id is reused, stored answers now point at different content.",
+   "mitigation": "Follow Moodle 4.x's question-versioning model: separate the stable identity from the content. `questions(id)` is the bank entry; `question_versions(id, question_id, version, status ready|draft|hidden, content, options jsonb)` holds immutable content; a test references either a pinned `question_version_id` or 'always latest'. Ranked mock tests MUST pin versions at test-publish time; only practice pools may float. `answers` FK to `question_version_id` and store the chosen `option_id` (a stable uuid per option, never an index). Never hard-delete: `status='hidden'` plus `ON DELETE RESTRICT` where an attempt exists. Editing a question that has attempts creates a new version and requires an explicit admin decision: 'apply to future attempts only' (default) or 'void for everyone and re-score' (EC-FAIR-02). Show the admin an attempt-count warning before any edit.",
+   "severity": "critical",
+   "layer": "db"
+  },
+  {
+   "id": "EC-DATA-05",
+   "scenario": "A question image fails to load: the Supabase Storage signed URL expired mid-attempt (a 1-hour `createSignedUrl` TTL inside a 3-hour exam), a CDN miss on 2G times out, or the device is offline and the image was never prefetched. Many JEE/NEET questions are image-only (circuit diagrams, ray optics, structures) \u2014 an unloaded image makes the question literally unanswerable.",
+   "failureMode": "Blank box. The student cannot answer, loses marks, and correctly claims the platform's fault. At 10k concurrent this can hit a whole cohort if a bucket or transform pipeline degrades.",
+   "mitigation": "(a) Serve question images from a PUBLIC bucket (documented 'high CDN cache HIT ratio') with unguessable path UUIDs, so there is no expiry to get wrong; reserve signed URLs for solutions/answer keys. If signed URLs are required, mint them with `expires_in = deadline_at - now() + 30min` at `start_attempt`, and refresh the manifest on heartbeat. Note Storage signed URLs are signed with a dedicated internal key separate from the Auth JWT signing key, so they survive auth key rotation. (b) Mandatory prefetch: `start_attempt` returns a manifest of every asset with sha256 + byte size; the client downloads all of them to disk before the timer starts (show a determinate progress bar), and the timer does not start until prefetch completes or the student explicitly opts into 'start anyway'. (c) Per-image retry with backoff plus a 'Report image not loading' button that writes an `attempt_incident` row. (d) Server-side rule: any question with \u2265N image-failure incidents in a live test is auto-flagged for admin void review. (e) Store an `alt_text`/LaTeX fallback rendering for every image at authoring time.",
+   "severity": "critical",
+   "layer": "infra"
+  },
+  {
+   "id": "EC-DATA-06",
+   "scenario": "A question renders broken LaTeX: the admin pasted `\\cline`/`\\multicolumn` (unsupported in KaTeX), a Word-smart-quote mangled a macro, an unescaped `$` split the expression, or a `\\newcommand` defined in one question leaks into another.",
+   "failureMode": "KaTeX in default `strict:'warn'` mode renders unsupported command names in red (configurable via `errorColor`) \u2014 the student sees red garbage instead of the integrand and cannot answer. With `throwOnError:true` the whole question screen white-screens and the attempt appears crashed.",
+   "mitigation": "Validate at authoring time, not render time: the admin question editor runs `katex.renderToString(src, {throwOnError:true, strict:true})` server-side in an Edge Function on save and BLOCKS publishing on failure, storing a `latex_valid boolean` + `latex_errors jsonb` on the question version. A pre-publish CI job re-validates every question in a test paper and refuses to publish a test containing an invalid render. At runtime use `throwOnError:false` with a React error boundary per question so one bad question can never kill the attempt; on fallback, show the raw source in a monospace block plus a prominent 'Report this question' action, and auto-create an `attempt_incident`. Disable `\\def/\\gdef` macro persistence between questions (fresh macro scope per render) to prevent cross-question leakage. Track `render_failure` telemetry per question_version_id so a systemic failure is caught in minutes.",
+   "severity": "high",
+   "layer": "client"
+  },
+  {
+   "id": "EC-DATA-07",
+   "scenario": "Numerical-value questions (JEE Main Section B integer answers, JEE Advanced numeric with decimals): a student enters '2.50' vs '2.5', '\u22123' with a Unicode minus, '1/2', '2.0e0', trailing whitespace, or a value inside a stated tolerance band.",
+   "failureMode": "Exact string comparison marks a correct answer wrong. Locale-specific numeric keyboards on Hindi/regional device locales emit Devanagari digits or a comma decimal separator, which parse to NaN and score 0.",
+   "mitigation": "Store the student's raw input verbatim AND a normalised canonical form. Normalisation: NFKC Unicode normalise, map U+2212/U+2013 to ASCII '-', strip whitespace and thousands separators, parse as decimal (not float) with a fixed-point library. Marking scheme is data, not code: `{type:'numeric', value:2.5, tolerance_abs:0.01}` or `{type:'numeric', value:2.5, decimals:2, rounding:'truncate'}` \u2014 JEE Advanced historically specifies truncation to 2 decimals, so encode it explicitly per question. Force the numeric keypad to ASCII digits regardless of device locale. Unit-test the comparator against a fixture set of pathological inputs; run it as a CI gate.",
+   "severity": "high",
+   "layer": "api"
+  },
+  {
+   "id": "EC-DATA-08",
+   "scenario": "Marking schemes differ per exam and per section: JEE Main MCQ +4/\u22121, Section B numeric +4/0 (no negative), JEE Advanced partial marking (+4 full, +3/+2/+1 partial, \u22122 wrong), NEET +4/\u22121. An admin cross-tags a question into both a JEE Main and a NEET paper.",
+   "failureMode": "A single global scoring constant produces wrong scores for one exam family. Partial-marking multi-correct questions scored as all-or-nothing systematically under-scores every JEE Advanced attempt. Because scores drive ranks, coins and streaks, the error propagates through the whole rewards layer.",
+   "mitigation": "Marking scheme belongs to the `(test_section, question)` join, not to the question and not to global config: `test_questions(test_id, section_id, question_version_id, marks_correct, marks_incorrect, marks_unattempted, partial_scheme jsonb, display_order)`. The scoring function is a pure Postgres function taking the row, so it is testable and reproducible. Snapshot the entire `test_questions` config into the attempt result as `scoring_config_hash` so a later config change cannot silently alter historical scores. Add a publish-time validator: every question in a section must have a scheme, and multi-correct questions must declare an explicit partial policy or publishing is blocked.",
+   "severity": "high",
+   "layer": "api"
+  },
+  {
+   "id": "EC-DATA-09",
+   "scenario": "Answers mapped by position rather than identity: the client sends `{index: 17, option: 2}` because the UI works off the shuffled array, and the server resolves index 17 against the unshuffled canonical order (or against a re-shuffled order after a resume).",
+   "failureMode": "Every answer is recorded against the wrong question. Catastrophic, silent, and it looks like the student simply performed badly \u2014 it can go undetected for months.",
+   "mitigation": "Never transmit positional indices. The wire format is `{question_version_id: uuid, option_id: uuid}` \u2014 both stable uuids minted at authoring time. The shuffled order exists only as a rendering concern derived from the persisted `question_order uuid[]` on the attempt row. Add a server-side assertion that every submitted `question_version_id` is a member of that attempt's `question_order`, rejecting with 422 otherwise \u2014 this alone catches the entire class of bug. Add a contract test that scores a shuffled attempt and an unshuffled attempt with identical answers and asserts equal scores.",
+   "severity": "critical",
+   "layer": "api"
+  },
+  {
+   "id": "EC-RAND-01",
+   "scenario": "Per-student randomised question order (and option order) must be identical on every resume, on every device, and after a reinstall \u2014 for the whole 3 hours and for the results review afterwards.",
+   "failureMode": "If the shuffle is computed client-side from Math.random() or from `Date.now()`, a reinstall or a second device produces a different paper. Mark-for-review flags and the student's mental map break; worse, a student could reshuffle repeatedly to surface an easier subset if the pool is larger than the paper.",
+   "mitigation": "Materialise the order once, server-side, at `start_attempt`, and persist it: `attempts.question_order uuid[]` and `attempts.option_order jsonb` (map question_version_id \u2192 ordered option_id[]). Generate it with a seeded Fisher\u2013Yates using `seed = hmac_sha256(server_secret, attempt_id)` \u2014 attempt-scoped, not user-scoped, so it is deterministic, reproducible for audit, and unpredictable to the client (the raw seed is never sent; only the resulting order is). Store the seed for reproducibility. Redis may cache the order for read throughput but is never the source of truth \u2014 Redis eviction or a flush must not be able to change a student's paper; always read-through to Postgres on miss.",
+   "severity": "critical",
+   "layer": "db"
+  },
+  {
+   "id": "EC-RAND-02",
+   "scenario": "Option shuffling applied blindly to questions whose options are order-dependent: 'All of the above', 'Both (A) and (C)', 'None of these', assertion-reason pairs, matching/match-the-column questions with List-I/List-II, and sequencing questions ('arrange in increasing order').",
+   "failureMode": "'All of the above' moves to position B and now refers to nothing coherent; 'Both (A) and (C)' names options that no longer exist at those labels. The question becomes unanswerable or has a different correct answer than the key. This is the classic silent shuffle bug and it directly costs marks.",
+   "mitigation": "Make shufflability an explicit, authored property, defaulting to OFF: `question_versions.shuffle_options boolean default false` plus `option_group` for options that must move together and `pinned_position smallint` for options that must stay last (None/All of the above). Add an automated authoring-time linter that scans option text for `/all of the (above|these)|none of (the above|these)|both \\(?[a-d]\\)?|only \\(?[a-d]\\)?|and \\(?[a-d]\\)?/i` and forces `shuffle_options=false` with an admin warning. Question types `matching`, `assertion_reason`, `sequencing`, `comprehension` are hard-coded non-shufflable. Because the key is stored as `option_id` (not a letter), a correct shuffle can never break scoring \u2014 the risk is purely semantic, which is why the linter is the control.",
+   "severity": "high",
+   "layer": "product"
+  },
+  {
+   "id": "EC-RAND-03",
+   "scenario": "Fair ranking under randomisation: students receive the same 90 questions in different orders (fine), OR different questions drawn from a larger pool (not fine for a shared leaderboard). Order effects are real \u2014 students fatigue and run out of time, so whoever gets the hard mechanics question at position 3 vs position 88 is not equally advantaged.",
+   "failureMode": "A single leaderboard silently compares non-equivalent papers. Students notice ('my friend got an easier set') and the ranking loses credibility, which is the entire value of a mock test series.",
+   "mitigation": "Separate two modes explicitly in the data model. `ranking_mode='strict'`: identical question set for all attempts (`test_questions` is fixed), only presentation order is randomised, and the leaderboard is valid. `ranking_mode='pooled'`: questions drawn per-student from a pool \u2014 the leaderboard is then percentile-based within the pool and must display a 'randomised paper' badge; consider IRT/difficulty-balanced draws (each draw must match a target difficulty histogram per chapter) rather than uniform sampling. For strict mode, additionally offer `shuffle_scope='within_section'` so section boundaries and the Physics/Chemistry/Maths ordering students expect are preserved. Log `position_of_question` per answer so you can measure and report order effects in analytics.",
+   "severity": "high",
+   "layer": "product"
+  },
+  {
+   "id": "EC-RAND-04",
+   "scenario": "Seed leakage or predictability: the shuffle seed is exposed to the client (e.g. returned in the manifest so the client can reproduce the order), or derived from a guessable value like `user_id + test_id`.",
+   "failureMode": "A student reverse-engineers the seed, precomputes the mapping from their order to the canonical order, and coordinates with peers who have already attempted \u2014 turning per-student randomisation into a shared cheat sheet. Predictable seeds also let someone determine the pool draw before starting.",
+   "mitigation": "Never send the seed. Send only the resolved `question_order`/`option_order` arrays, which reveal nothing beyond what the student can already see. Derive the seed as `hmac_sha256(SERVER_SECRET, attempt_id)` with the secret in Supabase Vault / Edge Function env, rotated independently of code. Because order is materialised in the DB, the seed is only needed for audit reproduction. Cross-student correlation of orders is still possible if two attempts share a seed \u2014 enforce uniqueness by keying on `attempt_id` (a uuid), not on `(user_id, test_id)`.",
+   "severity": "medium",
+   "layer": "api"
+  },
+  {
+   "id": "EC-RAND-05",
+   "scenario": "The question pool changes mid-window: an admin adds 5 questions or hides one while a weekend-window test is live and 3,000 attempts have already started.",
+   "failureMode": "Students who start after the change get a different paper from those who started before, inside the same leaderboard. If the paper composition is resolved lazily at render time rather than at attempt start, an in-flight attempt's paper can change under the student.",
+   "mitigation": "Papers are immutable once published: `tests.published_at` freezes `test_questions` (enforce with a trigger raising an exception on any write to `test_questions` where the parent test has `published_at IS NOT NULL AND ranking_mode='strict'`). Changes require creating `test_version = N+1`, which by default applies only to attempts started after it, and each attempt row records `test_version` so results are segmented correctly. If a change must apply retroactively (a genuinely broken question), it goes through the explicit void-and-rescore flow (EC-FAIR-02). Never resolve the question list at render time \u2014 resolve once at `start_attempt` into `attempts.question_order`.",
+   "severity": "high",
+   "layer": "db"
+  },
+  {
+   "id": "EC-FAIR-01",
+   "scenario": "A student reports the answer key is wrong for Q42 during or after a live test. Dozens more report the same. Real precedent: NTA runs a paid answer-key challenge window for JEE Main/NEET, and the NEET (UG) 2024 key was ultimately revised under Supreme Court direction.",
+   "failureMode": "Without a structured channel, reports arrive via support chat and WhatsApp, are lost, and the same question is disputed by 300 students with 300 separate tickets. Meanwhile ranks are published on a key that is known-wrong.",
+   "mitigation": "Ship a first-class challenge workflow: `question_challenges(id, question_version_id, attempt_id, user_id, reason enum, evidence text, status open|triaged|upheld|rejected, resolution_note, resolved_by, resolved_at)`, with a per-user per-question unique index so one student cannot spam. Open a time-boxed challenge window (e.g. 72h after result publication) mirroring NTA practice. Admin dashboard ranks challenges by `distinct_challenger_count` and by statistical signal \u2014 a question where the option distribution is bimodal or where top-decile students disproportionately chose a 'wrong' option is a strong key-error signal; compute a discrimination index (point-biserial correlation) per question and auto-surface any question with negative discrimination. Every resolution writes a public note visible to every challenger. Upheld challenges route into EC-DATA-03 (key version bump) or EC-FAIR-02 (void).",
+   "severity": "high",
+   "layer": "product"
+  },
+  {
+   "id": "EC-FAIR-02",
+   "scenario": "Admin voids a question for everyone \u2014 the question is genuinely ambiguous, out of syllabus, or a duplicate \u2014 after 6,000 attempts are scored and ranked, and after coins/badges have been awarded.",
+   "failureMode": "Re-scoring changes ranks. Students who dropped in rank feel cheated; students whose coins were already spent cannot have them clawed back; the leaderboard shows one thing while the student's result screen shows another because they were recomputed at different times.",
+   "mitigation": "Void is a first-class operation with a declared policy, chosen per void and recorded: `void_policy \u2208 {award_full_marks_to_all, award_full_marks_to_attempted_only, drop_question_and_rescale}` \u2014 NTA has used the 'full marks to all' pattern for disputed questions, and 'drop and rescale' is the fairest for percentile comparability. Implement as an answer-key version bump (EC-DATA-03) so the entire mechanism is shared. Recompute scores and ranks in ONE transaction that writes new `attempt_results` rows and a new `leaderboard_snapshot`, then atomically flips a `current_snapshot_id` pointer \u2014 never mutate a live leaderboard in place. Notify every affected student with an explicit before/after delta and the void reason. Coins/rewards: compensating top-ups only, never clawbacks; recompute rank-based prizes against the new snapshot and honour both old and new winners if prizes were already announced.",
+   "severity": "critical",
+   "layer": "product"
+  },
+  {
+   "id": "EC-FAIR-03",
+   "scenario": "Leaderboard tie-breaking: at 10,000 students on a 300-mark paper, hundreds share the same score. Ties also matter for contest prizes and coin payouts.",
+   "failureMode": "Non-deterministic ordering (Postgres returns tied rows in arbitrary order, and the order changes between queries) means a student's displayed rank flickers between page loads \u2014 a direct credibility hit. Naive `row_number()` also produces different ranks for identical scores.",
+   "mitigation": "Define and publish an explicit deterministic tie-break chain, modelled on the exam boards' own published policies: (1) total score desc; (2) fewer incorrect answers / higher accuracy; (3) subject-priority scores (NEET's historical chain: Biology, then Chemistry, then Physics; JEE Main: Maths, then Physics, then Chemistry); (4) fewer negative marks in that subject order; (5) shorter time-to-submit; (6) earlier `submitted_at`; (7) final deterministic tiebreak on `attempt_id` uuid so ordering is never ambiguous. Implement with `DENSE_RANK() OVER (ORDER BY <full chain>)` materialised into a `leaderboard_snapshot` table (not computed live), refreshed by a pg_cron job, and cached in Redis as a ZSET where the score is a packed composite (e.g. `score * 1e9 + (1e9 - time_taken_seconds)`) so Redis ordering matches Postgres ordering exactly. Show the tie-break rule in the UI.",
+   "severity": "high",
+   "layer": "db"
+  },
+  {
+   "id": "EC-FAIR-04",
+   "scenario": "A 'live' test scheduled 14:00\u201317:00 IST, with students in the Gulf (UTC+4, i.e. 12:30 local), Singapore (UTC+8), and the US (overnight). Device timezone is whatever the student set.",
+   "failureMode": "Students see the start time in device-local time and either miss the test or believe it has already ended. A student in a later timezone who sees the paper on social media before their local window opens has an unfair advantage if the window is defined per-timezone.",
+   "mitigation": "A live test has ONE absolute `starts_at timestamptz` and one `ends_at timestamptz` \u2014 never a per-timezone window. The UI always renders both device-local time and the canonical 'IST' label side by side ('14:00 IST \u00b7 12:30 your time'). Pre-test reminders are scheduled off the absolute instant. For non-live 'window' tests (open for 48h), accept that leakage is inherent and mark them `ranking_mode='pooled'` or explicitly label the leaderboard 'practice ranking, not comparable'. Content embargo: `start_attempt` is the only endpoint that returns question content, and it hard-refuses before `starts_at` \u2014 question rows must be unreadable via RLS before that instant, not merely hidden in the UI.",
+   "severity": "high",
+   "layer": "product"
+  },
+  {
+   "id": "EC-FAIR-05",
+   "scenario": "Late joiners to a live test: a student starts at 15:40 for a 14:00\u201317:00 live paper with a 180-minute duration.",
+   "failureMode": "If duration is applied naively they get until 18:40, an hour past the window \u2014 and can see the paper after others have finished and discussed it. If the deadline is truncated with no warning, they start a 180-minute paper with 80 minutes left and discover it only when the timer appears.",
+   "mitigation": "`deadline_at = min(started_at + duration, test.ends_at)` \u2014 the same formula as Moodle's `get_due_date()` (min of timestart+timelimit and timeclose). Enforce a `late_join_cutoff` (e.g. no new attempts after `starts_at + 30min`) so nobody starts a materially truncated paper. Show a blocking pre-start confirmation: 'This live test ends at 17:00 IST. You will have 1h 20m, not the full 3h. Your score will be marked as a shortened attempt.' Tag such attempts `shortened=true` and either exclude them from the ranked leaderboard or place them in a separate bucket \u2014 do not silently rank a 80-minute attempt against 180-minute attempts.",
+   "severity": "high",
+   "layer": "product"
+  },
+  {
+   "id": "EC-FAIR-06",
+   "scenario": "Pausing: a student asks to pause for a genuine reason (power cut, family emergency, hospital); or the product wants a 'pause' feature for practice mode; or a student discovers that killing the app functions as a pause.",
+   "failureMode": "If pause exists on ranked tests, it destroys comparability \u2014 unlimited effective time. If it does not exist but the timer is client-side, killing the app IS a pause (see EC-TIMER-01/05). If pause is admin-granted ad hoc with no audit, it becomes a fairness scandal.",
+   "mitigation": "Ranked mock tests: pausing is structurally impossible because `deadline_at` is an absolute server-side instant that no client action can move. State this explicitly in the pre-attempt screen. Practice mode uses a different model \u2014 `elapsed_seconds` accumulated server-side across resume events rather than an absolute deadline \u2014 implemented as a distinct `attempt_mode` so the two clocks never share code paths. Any deadline extension is a privileged, audited operation: `attempt_deadline_extensions(attempt_id, extra_seconds, reason, granted_by, evidence_incident_id, created_at)` with an append-only trigger, an RLS policy restricting it to ADMIN, and a mandatory link to an `attempt_incident`. Surface extensions on the leaderboard as an asterisk.",
+   "severity": "high",
+   "layer": "product"
+  },
+  {
+   "id": "EC-FAIR-07",
+   "scenario": "Platform-caused time loss: an Edge Function outage, a Storage/CDN degradation, or a bad deploy costs a cohort 12 minutes mid-test. Real precedent: NTA re-examined NEET (UG) 2024 on 23 June 2024 for 1,563 candidates 'who had experienced time loss during the originally scheduled examination on 05 May 2024', and has rescheduled exams for candidates affected by technical glitches (e.g. the CUET (UG) technical-glitch rescheduling notice).",
+   "failureMode": "Without a compensation mechanism the only options are 'do nothing' (students lose marks through no fault of theirs) or 'void the whole test' (destroys the mock series' value and the leaderboard). Both are trust-destroying.",
+   "mitigation": "Instrument time loss so it is measurable, not anecdotal: record per-attempt `api_error_seconds` derived from `attempt_incident` rows (each answer-sync failure, image failure and heartbeat gap is logged with duration). A pg_cron job computes, per attempt, `lost_seconds = sum of gaps > 20s where the server also observed elevated error rates in that window` \u2014 server-corroborated, so a student's own bad network is not compensated. Compensation ladder, applied automatically by policy: <60s \u2192 none; 60s\u201310min \u2192 grant equal extra time via `attempt_deadline_extensions` mid-flight and notify in-app; >10min or >15% of duration \u2192 offer a re-attempt on an equivalent paper and exclude the broken attempt from ranking (the NTA re-exam pattern). Publish the incident and the remedy \u2014 a status page entry plus in-app notification. Bake this policy into the T&Cs before launch so it is not negotiated during an incident.",
+   "severity": "critical",
+   "layer": "legal"
+  },
+  {
+   "id": "EC-FAIR-08",
+   "scenario": "Multiple attempts on the same mock: a student attempts a paper, sees the solutions, then re-attempts and scores 300/300, then appears on the leaderboard. Or two students collude \u2014 one attempts early and shares the paper.",
+   "failureMode": "The leaderboard becomes meaningless and honest students disengage. Analytics (weak-topic detection, chapter mastery) are poisoned by second-attempt scores.",
+   "mitigation": "`test_attempts_policy(test_id, max_attempts, ranked_attempt='first', solutions_visible_from)`. Only the FIRST attempt is leaderboard-eligible (`attempts.is_ranked` computed at creation via a partial unique index: `CREATE UNIQUE INDEX one_ranked_attempt ON attempts(user_id, test_id) WHERE is_ranked`). Solutions and the answer key are gated by RLS until `least(attempt.submitted_at, test.solutions_visible_from)` \u2014 for a live test, until the window closes for everyone. Enforce Moodle-style `delay1`/`delay2` cooldowns between attempts if desired. Re-attempts are clearly badged 'Practice re-attempt \u2014 not ranked' in the result UI and excluded from mastery analytics via an `is_ranked` filter in every analytics view.",
+   "severity": "high",
+   "layer": "product"
+  },
+  {
+   "id": "EC-FAIR-09",
+   "scenario": "In-attempt cheating on a consumer mobile device: screenshotting the paper, screen-recording, split-screen with a browser or a chat app, a second phone, or Android accessibility-service automation.",
+   "failureMode": "Leaked papers destroy the leaderboard for a live test. Unlike a proctored CBT centre you cannot prevent this \u2014 over-claiming that you can is worse than not claiming it.",
+   "mitigation": "Be honest about the threat model and use graduated, non-punitive controls. (a) `FLAG_SECURE` on Android and `isSecureTextEntry`-style screenshot suppression / `expo-screen-capture` `preventScreenCaptureAsync()` on both platforms; `addScreenshotListener` to log attempts. (b) Log every AppState `background` episode > 5s with duration into `attempt_focus_events`; surface `total_background_seconds` and `background_episodes` on the admin analytics view and on the student's own result screen (transparency deters). (c) Statistical detection rather than blocking: flag attempts with implausible answer velocity (e.g. >8 correct hard questions in <90s), near-identical answer vectors between two accounts (Jaccard similarity on wrong-answer choices is the strong signal \u2014 matching WRONG answers is far more diagnostic than matching right ones), and identical device fingerprints across accounts. (d) Human review before any leaderboard removal; never auto-void an attempt on a heuristic. (e) Watermark the rendered paper with a faint per-attempt id so a leaked screenshot is traceable.",
+   "severity": "medium",
+   "layer": "client"
+  },
+  {
+   "id": "EC-FAIR-10",
+   "scenario": "The same mock is run in multiple shifts/windows (morning and evening, or across a 48-hour window) with different question sets, but ranked on one leaderboard \u2014 mirroring how JEE Main runs multi-shift exams and normalises with percentile scores.",
+   "failureMode": "Raw scores across shifts are not comparable because paper difficulty differs. A student in a harder shift is unfairly ranked below a student in an easier shift, and 'my shift was harder' complaints are unanswerable without a documented method.",
+   "mitigation": "If ranking across shifts, do not rank on raw marks \u2014 compute a normalised percentile per shift, as NTA does for JEE Main: `percentile = 100 * (count of candidates in the shift with raw score <= this candidate) / total candidates in the shift`, computed per subject and overall, then merge. Store `shift_id` on every attempt and materialise `shift_percentile` in the leaderboard snapshot. Require a minimum shift size (e.g. \u2265200 attempts) before percentile normalisation is statistically meaningful; below that, do not merge shifts \u2014 show per-shift leaderboards. Publish the method in-app; the credibility of the number depends on it being explainable.",
+   "severity": "medium",
+   "layer": "product"
+  },
+  {
+   "id": "EC-NOTES-01",
+   "scenario": "Notes and bookmarks written during an attempt. The notes feature reads from a `notes` table that is also used for post-solution notes, and the solution/answer-key content is joinable from the client via PostgREST.",
+   "failureMode": "A student creates a note attached to Q42 during the attempt; if the note editor prefetches or the note row embeds the question's solution/explanation for context, the client has fetched the correct answer mid-exam. Even without embedding, a permissive RLS policy on `question_solutions` lets a student query the answer directly from the app's own Supabase client during the attempt \u2014 an end-to-end integrity break with no UI involved.",
+   "mitigation": "RLS is the control, not the UI. `question_solutions` and `answer_keys` policies: `USING (EXISTS (SELECT 1 FROM attempts a WHERE a.user_id = (select auth.uid()) AND a.question_order @> ARRAY[question_solutions.question_version_id] AND a.status IN ('submitted','abandoned')) OR EXISTS (SELECT 1 FROM profiles p WHERE p.id=(select auth.uid()) AND p.role='ADMIN'))` \u2014 solutions are unreadable while any attempt containing that question is `in_progress`. Wrap `auth.uid()` in `(select ...)` per Supabase's documented RLS performance guidance (up to 99.9% improvement) and index the policy columns. Additionally revoke SELECT on solution tables from `authenticated` entirely and expose them only through a `security definer` RPC that re-checks attempt state \u2014 defence in depth against a policy regression. During an attempt, the note editor fetches ONLY the question stem, never the solution.",
+   "severity": "critical",
+   "layer": "db"
+  },
+  {
+   "id": "EC-NOTES-02",
+   "scenario": "Notes and mark-for-review flags written while offline during an attempt, then synced. A note is 4KB of text with LaTeX; a student writes 30 of them.",
+   "failureMode": "Notes share the same sync queue as answers and can starve or delay answer writes on 2G \u2014 answers are the load-bearing data and must never queue behind a note. Notes written offline against a question that is later voided orphan. Conflicting note edits from two devices silently overwrite.",
+   "mitigation": "Two independent queues with different priorities: `answers` (P0, small, batched \u226450, drained first, blocking the submit path) and `notes/bookmarks` (P1, drained only when the answer queue is empty). Mark-for-review is answer-adjacent metadata and rides the P0 answer queue as a boolean on the same row \u2014 it is cheap and students rely on it. Notes key on `(user_id, question_version_id)` with `updated_at` LWW plus a conflict copy (`note_conflicts` table) rather than a silent overwrite, so no student text is ever destroyed. Notes FK to `question_version_id` with `ON DELETE RESTRICT` and survive question voiding. Cap note size (16KB) and count per attempt to bound abuse.",
+   "severity": "medium",
+   "layer": "client"
+  },
+  {
+   "id": "EC-NOTES-03",
+   "scenario": "Mark-for-review state conflated with answer state \u2014 the classic NTA CBT UI has four states (Not Visited, Not Answered, Answered, Marked for Review, Answered & Marked for Review) and students rely on the colour legend.",
+   "failureMode": "If 'Marked for Review' is stored as a variant of the answer instead of an orthogonal flag, marking a question can clear its answer, or an answered+marked question can be scored as unattempted \u2014 silently losing marks on questions the student was most careful about. Students who learned the pattern on the real NTA interface will misread a different legend.",
+   "mitigation": "Model as two orthogonal columns on the same row: `answers(attempt_id, question_version_id, selected_option_ids uuid[], numeric_value, marked_for_review boolean, visited boolean, client_seq)`. Scoring reads ONLY `selected_option_ids`/`numeric_value` and is completely blind to `marked_for_review` \u2014 assert this with a unit test. Replicate the NTA five-state palette and legend exactly so the mental model transfers, and show live counts per state in the question palette. On submit, show a confirmation summary ('Answered 78 \u00b7 Not Answered 9 \u00b7 Marked 12') with a hard confirm, since this is the last chance to catch a mismatch.",
+   "severity": "high",
+   "layer": "client"
+  },
+  {
+   "id": "EC-NOTES-04",
+   "scenario": "YouTube solution links attached to questions are fetched or prefetched by the client while an attempt is in progress (e.g. the question card component always resolves its `solution_video_url` field).",
+   "failureMode": "The link, its thumbnail, or its title leaks the answer during the exam; a student can open it in the background. Also a live-test leak vector: a video title like 'Q42 answer is C' is visible in a prefetched thumbnail.",
+   "mitigation": "Same RLS gate as EC-NOTES-01: `solution_video_url` lives on the solutions table, not on the question row, and is unreadable while an attempt containing that question is `in_progress`. Never `select('*')` on questions from the client \u2014 use explicit column lists and a dedicated `attempt_question_view` that physically excludes solution columns. Deep-link handling is disabled during an attempt (the router blocks navigation away from the attempt stack). Verify with an automated test that hits PostgREST directly with a student JWT mid-attempt and asserts a 403/empty result on every solution column.",
+   "severity": "high",
+   "layer": "db"
+  },
+  {
+   "id": "EC-SCALE-01",
+   "scenario": "10,000 concurrent attempts, each heartbeating every 30s and syncing answers every 10s: ~333 heartbeat req/s plus ~1,000 sync req/s sustained for 3 hours, all hitting Edge Functions and Postgres.",
+   "failureMode": "Postgres connection exhaustion (even a 16XL compute is documented at 500 max direct connections / 12,000 pooler clients; Large is 160/800), Edge Function cold starts adding latency, and the 2s CPU-per-request limit tripping under load. A backend brownout at minute 150 of a 180-minute paper is the worst possible time.",
+   "mitigation": "(a) Route everything through Supavisor transaction mode (port 6543) \u2014 documented as ideal for 'many transient connections' \u2014 and size compute so `pooler clients >= 2 \u00d7 peak concurrent clients`. (b) Make the heartbeat almost free: it reads `deadline_at` (cacheable in Redis with a 60s TTL keyed by attempt_id, since it is immutable) and returns `{server_now, seconds_left}`; it should touch Postgres only on cache miss. (c) Coalesce heartbeat and answer-sync into ONE request so 10k students generate ~1,000 req/s, not 1,333. (d) Widen the heartbeat interval adaptively: 30s in the last 10 minutes, 60s otherwise. (e) Load-test at 2\u00d7 target before every live test and publish a runbook. (f) Graceful degradation: if the sync endpoint 5xxs, the client keeps writing to SQLite and the sweeper still finalises correctly \u2014 the system must be correct even if the API is down for 20 minutes.",
+   "severity": "critical",
+   "layer": "infra"
+  },
+  {
+   "id": "EC-SCALE-02",
+   "scenario": "Redis (used for randomisation seeds, leaderboard ZSETs and caching) suffers an eviction under `maxmemory-policy allkeys-lru`, a failover, or a full flush during a live test.",
+   "failureMode": "If the shuffle order or the attempt deadline lived only in Redis, students' papers reorder mid-attempt or timers reset \u2014 catastrophic. If the leaderboard ZSET is the source of truth, ranks vanish or regress to a stale state.",
+   "mitigation": "Redis is strictly a cache and a rate-limiter, never a system of record for anything exam-critical. `question_order`, `option_order`, `deadline_at`, answers and results all live in Postgres; Redis entries are read-through with a Postgres fallback on every miss. Set `maxmemory-policy volatile-lru` and give exam-critical cache keys explicit TTLs so they are never the victim of an evict-everything policy. Leaderboard ZSETs are rebuilt from the `leaderboard_snapshot` table by an idempotent job, and the rebuild is triggered automatically on a Redis `keyspace miss` for the snapshot key. Distributed locks (e.g. guarding one-scoring-run-per-attempt) use `SET key token NX PX ttl` with a random token and a Lua compare-and-delete release \u2014 but the authoritative guard is the Postgres unique index, because a Redis lock can expire mid-critical-section and Redlock's safety assumptions do not hold under GC pauses.",
+   "severity": "high",
+   "layer": "infra"
+  },
+  {
+   "id": "EC-DATA-10",
+   "scenario": "An attempt row is created but the student never answers anything \u2014 they open the paper, panic, and close the app; or `start_attempt` succeeds but the manifest download fails and they never see a question.",
+   "failureMode": "The sweeper finalises it as a 0/300 submission, which appears in the student's history, tanks their visible average score, drags their leaderboard entry to the bottom, and breaks the streak/rewards logic. It also blocks the one-ranked-attempt-per-test rule so they can never legitimately attempt that paper.",
+   "mitigation": "Distinguish states as Moodle does \u2014 `finished` vs `abandoned` (Moodle's `stateabandoned` string is literally 'Never submitted'). An attempt with zero answered questions AND zero recorded question views is finalised as `abandoned`, excluded from scores, averages, analytics and the leaderboard, and does NOT consume the ranked-attempt slot (release `is_ranked` so the partial unique index frees up). An attempt with some answers is `submitted` and counts. Add an explicit 'Abandon this attempt' action in the first 5 minutes with a clear warning, so the student's intent is captured rather than inferred. Surface abandoned attempts to the student as 'Not counted' rather than as a score.",
+   "severity": "high",
+   "layer": "product"
+  },
+  {
+   "id": "EC-DATA-11",
+   "scenario": "Attempt row creation itself races: student double-taps 'Start Test' on a slow network, or the client retries `start_attempt` after a lost 200 response.",
+   "failureMode": "Two attempt rows with two different `deadline_at` values and two different `question_order` arrays. The client holds one; answers sync to it; the sweeper finalises both; two results, two leaderboard entries, and the student may be shown the paper from attempt A while answering into attempt B.",
+   "mitigation": "`start_attempt` is idempotent on an `idempotency_key` supplied by the client, and additionally guarded by `CREATE UNIQUE INDEX one_open_attempt_per_test ON attempts(user_id, test_id) WHERE status='in_progress'` \u2014 a partial unique index, the documented Postgres pattern for 'only one row satisfying a predicate'. The RPC does `INSERT ... ON CONFLICT DO NOTHING RETURNING *`, and on zero rows re-selects and returns the existing open attempt, so a duplicate call is a no-op that returns the same attempt. Wrap in `pg_advisory_xact_lock(hashtextextended(user_id::text || test_id::text, 0))` to serialise the check-then-insert under concurrency; transaction-scoped advisory locks release automatically at commit. Disable the Start button on first tap and drive it from the returned attempt_id, not from local state.",
+   "severity": "high",
+   "layer": "db"
+  },
+  {
+   "id": "EC-DATA-12",
+   "scenario": "Result review after submission: the student reviews their paper, and the review screen re-fetches questions and computes 'your answer vs correct answer' on the client.",
+   "failureMode": "If the review renders from live question rows rather than the pinned versions, a question edited since the attempt shows different text than what the student actually saw \u2014 they see a question they never answered marked wrong, which reads as the platform lying about their attempt. Option shuffling not replayed means 'you chose B' points at the wrong option text.",
+   "mitigation": "Review is a replay of the immutable attempt snapshot: render from `question_version_id` (pinned) and the persisted `option_order` for that attempt, so the review screen is pixel-identical in content and ordering to what was on screen during the exam. The 'correct answer' comes from the `answer_key_version` recorded on the result row, so a later key revision does not retroactively confuse the review \u2014 instead show an explicit 'This question's key was revised on <date>; your score was updated' banner when `result.answer_key_version < current`. Never compute scores on the client; the review screen displays server-computed per-question marks from `attempt_question_results`.",
+   "severity": "high",
+   "layer": "client"
+  }
+ ],
+ "sources": [
+  "https://raw.githubusercontent.com/moodle/moodle/MOODLE_405_STABLE/mod/quiz/lang/en/quiz.php",
+  "https://raw.githubusercontent.com/moodle/moodle/MOODLE_405_STABLE/mod/quiz/settings.php",
+  "https://raw.githubusercontent.com/moodle/moodle/MOODLE_405_STABLE/mod/quiz/classes/quiz_attempt.php",
+  "https://raw.githubusercontent.com/moodle/moodle/MOODLE_405_STABLE/mod/quiz/classes/task/update_overdue_attempts.php",
+  "https://supabase.com/docs/guides/auth/sessions",
+  "https://supabase.com/docs/guides/functions/limits",
+  "https://supabase.com/docs/guides/realtime/quotas",
+  "https://supabase.com/docs/guides/realtime/presence",
+  "https://supabase.com/docs/guides/platform/compute-and-disk",
+  "https://supabase.com/docs/guides/database/connecting-to-postgres",
+  "https://supabase.com/docs/guides/database/postgres/row-level-security",
+  "https://supabase.com/docs/guides/storage/serving/downloads",
+  "https://supabase.com/docs/guides/cron",
+  "https://supabase.com/docs/guides/queues",
+  "https://www.postgresql.org/docs/17/explicit-locking.html",
+  "https://www.postgresql.org/docs/17/indexes-partial.html",
+  "https://docs.stripe.com/api/idempotent_requests",
+  "https://www.rfc-editor.org/rfc/rfc7519",
+  "https://developers.google.com/time/smear",
+  "https://reactnative.dev/docs/appstate",
+  "https://docs.expo.dev/versions/latest/sdk/background-task/",
+  "https://docs.expo.dev/versions/latest/sdk/sqlite/",
+  "https://developer.apple.com/documentation/uikit/uiapplication/beginbackgroundtask(withname:expirationhandler:)",
+  "https://developer.mozilla.org/en-US/docs/Web/API/Page_Visibility_API",
+  "https://tanstack.com/query/latest/docs/framework/react/guides/mutations",
+  "https://katex.org/docs/supported",
+  "https://www.nta.ac.in/",
+  "https://www.nta.ac.in/Download/Notice/Notice_20240726213317.pdf",
+  "https://redis.io/glossary/redis-lock/",
+  "https://developer.android.com/reference/android/os/SystemClock"
+ ]
+}
