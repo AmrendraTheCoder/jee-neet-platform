@@ -16,7 +16,12 @@
     "lint:rls": "node scripts/check-rls.mjs",
     "scan:secrets": "node scripts/scan-secrets.mjs",
     "gates:self-test": "node scripts/lint-sql.mjs --self-test && node scripts/check-rls.mjs --self-test && node scripts/scan-secrets.mjs --self-test",
-    "verify": "pnpm gates:self-test && pnpm typecheck && pnpm test && pnpm lint:sql && pnpm lint:rls && pnpm scan:secrets"
+    "db:sync": "pnpm --filter @platform/db db:sync",
+    "db:guard": "pnpm --filter @platform/db db:guard",
+    "db:deploy": "pnpm --filter @platform/db db:deploy",
+    "db:status": "pnpm --filter @platform/db db:status",
+    "db:pull": "pnpm --filter @platform/db db:pull",
+    "verify": "pnpm gates:self-test && pnpm typecheck && pnpm test && pnpm lint:sql && pnpm lint:rls && pnpm db:guard && pnpm scan:secrets"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

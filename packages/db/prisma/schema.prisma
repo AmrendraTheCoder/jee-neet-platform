@@ -1,0 +1,69 @@
+// Prisma schema for the assessment platform.
+//
+// READ THIS BEFORE RUNNING ANY PRISMA COMMAND.
+//
+// This project is database-first, and deliberately so. The SQL under
+// `packages/db/migrations/` is the source of truth; `prisma/migrations/` is
+// generated from it by `pnpm db:sync`. Prisma is the applier and the query
+// client here, never the author of the schema.
+//
+// The reason is not preference. Prisma's schema language cannot express row
+// level security policies, SECURITY DEFINER functions, empty search paths,
+// range partitioning, triggers, exclusion constraints, generated columns or
+// domain-checked types. Every one of those is load-bearing in this database:
+// invariant 3 says a table ships with RLS and at least one policy or it does
+// not ship, and the answer keys live in a schema Prisma is not even pointed at.
+//
+// So:
+//
+//   `prisma migrate deploy`  YES. Applies the generated SQL in order.
+//   `prisma db pull`         YES. Regenerates the models below from the live
+//                            database after a deploy.
+//   `prisma migrate dev`     NO. Diffs against this file and writes SQL to
+//                            "correct" the drift it sees. What it sees as
+//                            drift is the security model.
+//   `prisma db push`         NO. Same, without even writing the migration
+//                            down first.
+//
+// `pnpm db:guard` fails the build if the generated migrations have drifted from
+// the SQL, so the two cannot silently disagree.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+
+  // Prisma 7 moved connection URLs out of the schema. The CLI reads
+  // `datasource.url` from `prisma.config.ts`, which points at DIRECT_URL
+  // because migrations are DDL and DDL needs a session, not a transaction-
+  // pooled connection.
+  //
+  // The runtime connection is a separate concern: the client is constructed
+  // with a driver adapter over DATABASE_URL (the transaction pooler) in
+  // `src/client.ts`, which also asserts the `pgbouncer=true` flag that pooler
+  // requires. See `.env.example` for why that flag is not optional.
+}
+
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+//
+// Intentionally empty until you run `pnpm db:pull` against a database that has
+// had `pnpm db:deploy` applied. Introspection writes them here.
+//
+// Only `public` is introspected, because `multiSchema` is not enabled and the
+// connection's search path does not include `private`. That is a security
+// property worth keeping rather than a limitation: `private.answer_key`,
+// `private.question_solution`, `private.option_rationale` and
+// `private.user_role` cannot appear in the generated client, so no amount of
+// autocomplete-driven development can produce a query that reads an answer key.
+// Those tables are reachable only through the state-checking RPCs in migration
+// 0006, called with `$queryRaw`.
+//
+// Expect introspection warnings on `tstzrange`, the generated columns and the
+// partitioned tables. Prisma renders what it cannot type as `Unsupported(...)`
+// and comments out what it cannot model at all. That is correct and expected;
+// do not "fix" it by changing the database.

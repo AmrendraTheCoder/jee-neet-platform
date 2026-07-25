@@ -33,8 +33,27 @@ import { isProbablyBinary, readTextFile, repoRoot, walkFiles } from './lib/walk.
 const ROOT = repoRoot(import.meta.url);
 const ALLOW_MARKER = 'secret-scan' + ':allow';
 
-/** Paths whose whole purpose is to carry placeholder credential names. */
-const EXEMPT_PATHS = new Set(['.env.example', 'apps/web/.env.example', 'apps/mobile/.env.example']);
+/**
+ * Files whose whole purpose is to carry placeholder credential names.
+ *
+ * Matched on the basename, not on an enumerated list of locations. The previous
+ * form named three specific paths, which meant the fourth package to add a
+ * template — `packages/db/.env.example`, documenting a Supabase connection
+ * string — failed the gate for doing exactly what the convention asks. An
+ * enumeration that has to be extended every time the repository grows is a
+ * gate people learn to edit rather than obey.
+ *
+ * The widening is safe because the exemption is earned by the filename that
+ * declares the file a template. A real secret in a file called `.env.example`
+ * is already committed to version control by the time this scanner sees it;
+ * the control for that is `.gitignore` covering `.env`, which it does.
+ */
+const EXEMPT_BASENAMES = new Set(['.env.example']);
+
+function isExempt(relPath) {
+  const slash = relPath.lastIndexOf('/');
+  return EXEMPT_BASENAMES.has(slash === -1 ? relPath : relPath.slice(slash + 1));
+}
 
 /**
  * Values that look like credentials but are documentation. Kept deliberately
@@ -221,7 +240,7 @@ function redact(value) {
 }
 
 export function scanText(relPath, text, report) {
-  const exempt = EXEMPT_PATHS.has(relPath);
+  const exempt = isExempt(relPath);
 
   for (const rule of RULES) {
     const rx = new RegExp(rule.pattern.source, rule.pattern.flags);
@@ -407,6 +426,18 @@ function runSelfTest() {
     {
       name: '.env.example may document credential variable names',
       assert: () => firedOn('.env.example', `SUPABASE_SERVICE_ROLE_KEY=replace-me`).size === 0,
+    },
+    {
+      name: 'a nested .env.example is exempt wherever it lives',
+      assert: () =>
+        firedOn('packages/db/.env.example', `DATABASE_URL="postgresql://user:PASSWORD@host:6543/postgres"`) // secret-scan:allow
+          .size === 0,
+    },
+    {
+      name: 'a connection string in a file that is not an env template still fails',
+      assert: () =>
+        firedOn('packages/db/src/client.ts', `const url = 'postgresql://user:PASSWORD@host:6543/postgres';`) // secret-scan:allow
+          .has('SEC-DB-URL'),
     },
     {
       name: 'clean application source produces nothing',

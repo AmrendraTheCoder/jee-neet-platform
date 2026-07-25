@@ -5,3 +5,8 @@ allowBuilds:
   # esbuild ships a platform-specific binary via its install script; vitest
   # cannot transform TypeScript without it.
   esbuild: true
+  # Prisma fetches its platform-specific schema and query engines in a
+  # postinstall. Without them `prisma migrate deploy` cannot run at all, which
+  # is the one command CI needs from packages/db.
+  prisma: true
+  '@prisma/engines': true

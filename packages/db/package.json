@@ -3,8 +3,32 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "PostgreSQL migrations, RLS policies and scoring functions",
+  "description": "PostgreSQL migrations, RLS policies, scoring functions and the Prisma access layer",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./generated/prisma/client.js": "./generated/prisma/client.js"
+  },
   "scripts": {
-    "lint": "node ../../scripts/lint-sql.mjs && node ../../scripts/check-rls.mjs"
+    "typecheck": "tsc --noEmit",
+    "lint": "node ../../scripts/lint-sql.mjs && node ../../scripts/check-rls.mjs",
+    "db:sync": "node scripts/sync-prisma-migrations.mjs",
+    "db:guard": "node scripts/sync-prisma-migrations.mjs --check",
+    "db:deploy": "node scripts/sync-prisma-migrations.mjs --check && prisma migrate deploy",
+    "db:status": "prisma migrate status",
+    "db:pull": "prisma db pull && prisma generate",
+    "db:generate": "prisma generate",
+    "db:resolve": "prisma migrate resolve"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.20.0",
+    "prisma": "^7.9.0",
+    "typescript": "^5.7.2"
+  },
+  "dependencies": {
+    "@prisma/adapter-pg": "^7.9.0",
+    "@prisma/client": "^7.9.0",
+    "pg": "^8.22.0"
   }
 }

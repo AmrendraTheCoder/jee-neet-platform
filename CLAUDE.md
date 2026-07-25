@@ -143,3 +143,26 @@ pnpm gates:self-test
 
 The secret scanner deliberately includes build output — run `pnpm --filter
 @platform/web build` before it if you want the bundle covered.
+
+## The database
+
+Schema changes are SQL files in `packages/db/migrations/`. Prisma applies them
+and never authors them — `prisma/migrations/` is generated from that directory,
+and `pnpm db:guard` (part of `verify`) fails if the two disagree.
+
+```bash
+pnpm db:deploy
+```
+
+`prisma migrate dev` and `prisma db push` are forbidden. Both diff the database
+against `schema.prisma` and write SQL to remove what they see as drift; what
+they see as drift is the RLS policies, the definer functions and the partitions.
+Add a numbered SQL file and run `pnpm db:sync` instead. Full rationale in
+[packages/db/README.md](packages/db/README.md).
+
+**Prisma connects as the table owner, so RLS does not apply to it.**
+`prisma.attempt.findMany()` returns every student's attempts in every org. That
+is correct for a worker and wrong for anything serving a user; wrap those in
+`withPrincipal(prisma, { userId, orgId }, …)`, which sets the JWT claims and
+role transaction-locally so the policies apply as they would to a PostgREST
+request.

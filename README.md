@@ -94,6 +94,22 @@ that coverage:
 pnpm --filter @platform/web build
 ```
 
+### The database
+
+Copy `packages/db/.env.example` to `packages/db/.env`, fill in the two Supabase
+connection strings, then apply the schema:
+
+```bash
+pnpm db:deploy
+```
+
+The SQL in `packages/db/migrations/` is the source of truth; Prisma applies it
+and never authors it, because Prisma's schema language cannot express row-level
+security, definer functions or partitioning — which is most of what this schema
+is. `prisma migrate dev` and `prisma db push` are forbidden for that reason. See
+[packages/db/README.md](packages/db/README.md), particularly the section on why
+Prisma reads past RLS unless you wrap the query.
+
 ---
 
 ## Two things that are deliberately unfinished
