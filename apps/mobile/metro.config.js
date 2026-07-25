@@ -18,6 +18,10 @@ config.watchFolders = [workspaceRoot];
 config.resolver.nodeModulesPaths = [
   path.resolve(projectRoot, 'node_modules'),
   path.resolve(workspaceRoot, 'node_modules'),
+  // pnpm virtual store — needed so Metro can resolve packages (e.g.
+  // @expo/metro-runtime) that are imported by packages living inside the
+  // .pnpm directory but are not direct dependencies of those packages.
+  path.resolve(workspaceRoot, 'node_modules/.pnpm/node_modules'),
 ];
 config.resolver.disableHierarchicalLookup = true;
 
