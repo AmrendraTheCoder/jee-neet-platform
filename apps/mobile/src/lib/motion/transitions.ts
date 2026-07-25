@@ -11,11 +11,25 @@
  */
 
 import { useEffect } from 'react';
+import type { ViewStyle } from 'react-native';
 import type { WithTimingConfig } from 'react-native-reanimated';
 import { Easing, useAnimatedStyle, useSharedValue, withDelay, withTiming } from 'react-native-reanimated';
 
 import type { DurationToken, EasingToken } from './tokens.js';
 import { duration, easing, REDUCED_MOTION_DURATION, STAGGER_MAX_CHILDREN, STAGGER_STEP_MS } from './tokens.js';
+
+/**
+ * The handle these hooks return.
+ *
+ * Pinned to `ViewStyle` rather than left as `ReturnType<typeof useAnimatedStyle>`.
+ * That bare form instantiates the hook's generic with its default, `DefaultStyle`,
+ * which is the union of view, text and image styles — and `AnimatedStyleHandle`
+ * is invariant in its parameter, so the union does not flow into the
+ * `Animated.View` style prop that wants the view member specifically. Every
+ * animation in this client is opacity and transform on a view, so naming that
+ * is both accurate and the thing that makes the handle assignable.
+ */
+export type AnimatedViewStyle = ReturnType<typeof useAnimatedStyle<ViewStyle>>;
 
 export function timing(
   token: DurationToken,
@@ -48,7 +62,7 @@ export function staggerDelay(index: number, reduceMotion: boolean): number {
  * The rise is deliberately small. A large translation on entry reads as a
  * transition between contexts, and a list row appearing is not that.
  */
-export function useEnter(index: number, reduceMotion: boolean): ReturnType<typeof useAnimatedStyle> {
+export function useEnter(index: number, reduceMotion: boolean): AnimatedViewStyle {
   const progress = useSharedValue(0);
 
   useEffect(() => {
@@ -58,7 +72,7 @@ export function useEnter(index: number, reduceMotion: boolean): ReturnType<typeo
     );
   }, [index, progress, reduceMotion]);
 
-  return useAnimatedStyle(() => ({
+  return useAnimatedStyle<ViewStyle>(() => ({
     opacity: progress.value,
     transform: [{ translateY: (1 - progress.value) * (reduceMotion ? 0 : 6) }],
   }));
@@ -71,13 +85,13 @@ export function useEnter(index: number, reduceMotion: boolean): ReturnType<typeo
  * is what a physical button does.
  */
 export function usePressScale(reduceMotion: boolean): {
-  readonly style: ReturnType<typeof useAnimatedStyle>;
+  readonly style: AnimatedViewStyle;
   readonly onPressIn: () => void;
   readonly onPressOut: () => void;
 } {
   const pressed = useSharedValue(0);
 
-  const style = useAnimatedStyle(() => ({
+  const style = useAnimatedStyle<ViewStyle>(() => ({
     transform: [{ scale: 1 - pressed.value * 0.02 }],
   }));
 
@@ -96,7 +110,7 @@ export function usePressScale(reduceMotion: boolean): {
 export function useValueChangeFlash(
   dependency: number | string,
   reduceMotion: boolean,
-): ReturnType<typeof useAnimatedStyle> {
+): AnimatedViewStyle {
   const progress = useSharedValue(1);
 
   useEffect(() => {
@@ -104,5 +118,5 @@ export function useValueChangeFlash(
     progress.value = withTiming(1, timing('state', 'standard', reduceMotion));
   }, [dependency, progress, reduceMotion]);
 
-  return useAnimatedStyle(() => ({ opacity: progress.value }));
+  return useAnimatedStyle<ViewStyle>(() => ({ opacity: progress.value }));
 }

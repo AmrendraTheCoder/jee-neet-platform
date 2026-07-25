@@ -278,6 +278,9 @@ create table public.attempt_section (
   unique (attempt_id, test_section_id)
 );
 
+comment on table public.attempt_section is
+  'Per-section progress within one attempt: entry, exit, lock and accumulated time. locked_at is the durable record that a time-locked section closed, so a resumed client cannot re-enter it and a prefetch cannot keep its items in scope (FR-SYN-11).';
+
 create index attempt_section_org_user_idx on public.attempt_section (org_id, user_id);
 create index attempt_section_attempt_idx on public.attempt_section (attempt_id);
 

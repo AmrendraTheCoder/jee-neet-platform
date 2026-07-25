@@ -219,6 +219,9 @@ create table public.mistake_tag (
   unique (attempt_id, question_version_id)
 );
 
+comment on table public.mistake_tag is
+  'The student own classification of why they lost a mark -- conceptual, calculation, misread, time. Self-reported on purpose: an inferred cause would be behavioural profiling of a minor, and the error-type analytics are only as honest as the person entering them.';
+
 create index mistake_tag_org_user_idx on public.mistake_tag (org_id, user_id);
 create index mistake_tag_attempt_idx on public.mistake_tag (attempt_id);
 

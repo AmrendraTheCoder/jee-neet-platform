@@ -107,6 +107,9 @@ create table public.topic (
   unique (chapter_id, code)
 );
 
+comment on table public.topic is
+  'Second taxonomy level, under chapter. Org-scoped so a tenant may extend the shared platform taxonomy without forking it; the read policy unions the caller org with the platform org.';
+
 create index topic_org_idx on public.topic (org_id);
 create index topic_chapter_idx on public.topic (chapter_id, ordinal);
 
@@ -163,6 +166,9 @@ create table public.syllabus_chapter (
   weight numeric(6, 4),
   primary key (syllabus_id, chapter_id)
 );
+
+comment on table public.syllabus_chapter is
+  'Chapters in scope for one syllabus year, with the blueprint weighting hint. Carries its own org_id rather than reaching through syllabus_id, so the tenancy predicate stays a column comparison and never becomes a join inside a policy.';
 
 create index syllabus_chapter_org_idx on public.syllabus_chapter (org_id);
 create index syllabus_chapter_chapter_idx on public.syllabus_chapter (chapter_id);

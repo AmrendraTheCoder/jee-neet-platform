@@ -74,6 +74,28 @@ textarea {
   flex-direction: column;
 }
 
+/*
+ * Shell chrome. Deliberately absent from the attempt player: FR-ATT-09 makes a
+ * ranked attempt unpausable, and a nav bar beside a running clock is a way to
+ * lose a paper by misclick.
+ */
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: var(--border-hairline) solid var(--border);
+  background: var(--surface-raised);
+}
+.app-header__brand {
+  font-weight: 600;
+  color: var(--fg);
+  text-decoration: none;
+}
+.app-header__brand:hover {
+  text-decoration: underline;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;

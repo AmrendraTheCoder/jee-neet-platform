@@ -13,7 +13,7 @@
  */
 
 import { Rating, State, createEmptyCard, fsrs, generatorParameters } from 'ts-fsrs';
-import type { Card as FsrsCard, FSRS, FSRSParameters } from 'ts-fsrs';
+import type { Card as FsrsCard, FSRS, FSRSParameters, Grade } from 'ts-fsrs';
 
 import type { SubTopicId } from '@platform/domain';
 
@@ -35,7 +35,11 @@ export interface ReviewCard {
   readonly lastReviewMs: number | null;
 }
 
-const RATING_BY_NAME: Readonly<Record<ReviewRating, Rating>> = {
+// `Grade`, not `Rating`. Rating additionally carries `Manual`, which the
+// scheduler's `next()` rejects because a manual reschedule is not a review and
+// produces no interval. The four values below are exactly `Grade`, so naming it
+// here is what keeps that guarantee at the type level rather than at the call.
+const RATING_BY_NAME: Readonly<Record<ReviewRating, Grade>> = {
   AGAIN: Rating.Again,
   HARD: Rating.Hard,
   GOOD: Rating.Good,

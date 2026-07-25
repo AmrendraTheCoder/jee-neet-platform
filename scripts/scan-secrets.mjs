@@ -375,7 +375,7 @@ function runSelfTest() {
     {
       name: 'a credential-named assignment with a real value is a failure',
       assert: () =>
-        firedOn('apps/web/src/config.ts', `export const CLIENT_SECRET = 'a9f3k2ldm38fj2';`).has(
+        firedOn('apps/web/src/config.ts', `export const CLIENT_SECRET = 'a9f3k2ldm38fj2';`).has( // secret-scan:allow
           'SEC-ASSIGNMENT',
         ),
     },

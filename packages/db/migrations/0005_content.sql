@@ -343,6 +343,9 @@ create table public.question_option_translation (
   unique (question_option_id, language)
 );
 
+comment on table public.question_option_translation is
+  'Translated option text, keyed to the option UUID rather than to its position. Invariant 6: an answer is {question_version_id, option_id}, so a translation can never shift which option a key refers to.';
+
 create index question_option_translation_org_idx on public.question_option_translation (org_id);
 
 /* ------------------------------------------------------------------ *

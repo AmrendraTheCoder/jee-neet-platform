@@ -66,21 +66,33 @@ Violating any of these is a defect regardless of what the ticket says. Full text
 
 ## Developing
 
-Node 22, pnpm 11.
+Node 22, pnpm 11. Node 20 will not install this workspace.
 
 ```bash
 pnpm install
 ```
 
 ```bash
+pnpm verify
+```
+
+`verify` proves the gates still fire, then runs the workspace typecheck, the
+domain test suite, and the three static gates: `lint:sql`, `lint:rls` and
+`scan:secrets`. Each is also runnable on its own while iterating.
+
+```bash
 ./node_modules/.bin/vitest run
 ```
 
-```bash
-node scripts/lint-sql.mjs
-```
-
 The domain engine has no dependencies and no I/O, so its tests need nothing installed beyond vitest.
+
+The secret scanner deliberately reads build output, because a bundle is where an
+inlined credential actually does harm. Build the web client first if you want
+that coverage:
+
+```bash
+pnpm --filter @platform/web build
+```
 
 ---
 

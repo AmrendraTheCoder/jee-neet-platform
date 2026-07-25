@@ -1,0 +1,10 @@
+{
+  "name": "@platform/db",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "PostgreSQL migrations, RLS policies and scoring functions",
+  "scripts": {
+    "lint": "node ../../scripts/lint-sql.mjs && node ../../scripts/check-rls.mjs"
+  }
+}

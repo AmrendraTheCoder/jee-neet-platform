@@ -46,18 +46,38 @@ export interface Session {
   readonly isMinor: boolean;
 }
 
-/** The server-controlled claim namespace. Never `user_metadata`. */
+/**
+ * The server-controlled claim namespace. Never `user_metadata`.
+ *
+ * These names are the contract with `private.custom_access_token_hook` in
+ * migration 0002, which writes `org_id`, `roles` and `perms` as top-level
+ * claims. They are not free choices on this side: a claim this file reads under
+ * a name the hook does not write is silently absent, and an absent role claim
+ * renders a student shell to an administrator.
+ */
 interface ProjectedClaims {
   readonly sub?: unknown;
   readonly org_id?: unknown;
-  readonly app_role?: unknown;
-  readonly app_capabilities?: unknown;
+  readonly roles?: unknown;
+  readonly perms?: unknown;
   readonly display_name?: unknown;
   readonly is_minor?: unknown;
 }
 
 function isRole(value: unknown): value is Role {
   return value === 'STUDENT' || value === 'ADMIN' || value === 'GUARDIAN';
+}
+
+/**
+ * The hook projects every granted role as an array, because a user may hold
+ * more than one. The shell renders one, so the most capable wins.
+ */
+function readRole(value: unknown): Role | null {
+  if (!Array.isArray(value)) return null;
+  for (const candidate of ['ADMIN', 'GUARDIAN', 'STUDENT'] as const) {
+    if (value.includes(candidate)) return candidate;
+  }
+  return null;
 }
 
 function readCapabilities(value: unknown): ReadonlySet<Capability> {
@@ -97,15 +117,23 @@ export function sessionFromAccessToken(token: string): Session | null {
   }
 
   if (typeof claims.sub !== 'string' || typeof claims.org_id !== 'string') return null;
-  if (!isRole(claims.app_role)) return null;
+
+  const role = readRole(claims.roles);
+  if (!isRole(role)) return null;
 
   return {
     userId: claims.sub,
     orgId: claims.org_id,
-    role: claims.app_role,
+    role,
     displayName: typeof claims.display_name === 'string' ? claims.display_name : 'Signed in',
-    capabilities: readCapabilities(claims.app_capabilities),
-    isMinor: claims.is_minor === true,
+    capabilities: readCapabilities(claims.perms),
+    // Absent means minor, matching app.is_minor() in migration 0003, which
+    // treats an unknown date of birth as a child. The restrictive default is
+    // the correct one: this flag gates the engagement telemetry pipeline and
+    // the notification path, and defaulting it to `false` would route a
+    // principal of unknown age down the pipeline that is unlawful for minors
+    // (NFR-PRV-02).
+    isMinor: claims.is_minor !== false,
   };
 }
 

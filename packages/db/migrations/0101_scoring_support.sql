@@ -123,6 +123,9 @@ create table if not exists private.server_secret (
   created_at  timestamptz not null default pg_catalog.now()
 );
 
+comment on table private.server_secret is
+  'Server-held key material, currently the per-attempt shuffle seed. Private schema with zero grants and a deny-all policy: a student who reads this can precompute their own option order, and reproduce every other candidate order in the cohort.';
+
 alter table private.server_secret enable row level security;
 
 -- Invariant 3: a table ships with RLS enabled and at least one policy. This
@@ -131,7 +134,7 @@ alter table private.server_secret enable row level security;
 -- SECURITY DEFINER functions only.
 drop policy if exists server_secret_no_access on private.server_secret;
 create policy server_secret_no_access on private.server_secret
-  for all to public using (false) with check (false);
+  for all to authenticated using (false) with check (false);
 
 -- Seeded from core primitives only (gen_random_bytes is pgcrypto, and this
 -- package deliberately takes no extension dependency). Operations should
@@ -315,10 +318,13 @@ create unique index if not exists scoring_queue_live_attempt_idx
 create index if not exists scoring_queue_visible_idx
   on private.scoring_queue (visible_at) where archived_at is null;
 
+comment on table private.scoring_queue is
+  'Work queue for post-submission scoring. Durable Postgres rows rather than an external broker so the enqueue commits in the same transaction as the attempt status flip; visible_at plus read_ct give at-least-once delivery with backoff, and scoring is idempotent so redelivery is safe.';
+
 alter table private.scoring_queue enable row level security;
 drop policy if exists scoring_queue_no_access on private.scoring_queue;
 create policy scoring_queue_no_access on private.scoring_queue
-  for all to public using (false) with check (false);
+  for all to authenticated using (false) with check (false);
 
 -- ---------------------------------------------------------------------
 -- Rescore run ledger
@@ -340,10 +346,13 @@ create table if not exists private.rescore_run (
   primary key (test_id, answer_key_version)
 );
 
+comment on table private.rescore_run is
+  'One row per (test, answer key version) rescore, keyed so a redelivered job returns the snapshot it already produced instead of emitting a second identical leaderboard (AC-SCR-01). Idempotency at the level of the whole operation, not of each row it writes.';
+
 alter table private.rescore_run enable row level security;
 drop policy if exists rescore_run_no_access on private.rescore_run;
 create policy rescore_run_no_access on private.rescore_run
-  for all to public using (false) with check (false);
+  for all to authenticated using (false) with check (false);
 
 -- ---------------------------------------------------------------------
 -- Score revision ledger (FR-SCR-15, EC-DATA-03)

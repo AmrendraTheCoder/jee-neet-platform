@@ -1,0 +1,186 @@
+/*
+ * Admin console layout.
+ *
+ * The console is a desk tool: it is used on a large screen, for long stretches,
+ * by a small number of people who will see thousands of items through it. So
+ * the priorities here are the opposite of the player's. Density over comfort,
+ * because an editor scanning a review queue wants more rows on screen. Monospace
+ * for anything that is an identifier, because the operator's job includes
+ * noticing that two UUIDs differ. No animation anywhere, because nothing here
+ * is worth waiting for.
+ *
+ * It still narrows to one column below 60rem. Approving a flagged item from a
+ * phone at 9pm is a real thing that happens the night before a live test.
+ */
+
+.admin-page {
+  width: 100%;
+  max-width: 78rem;
+  margin: 0 auto;
+}
+
+.admin-page h1 {
+  font-size: var(--text-2xl);
+  line-height: var(--leading-tight);
+  margin-bottom: var(--space-4);
+}
+
+/* Item list beside the editor. */
+.admin-page--split {
+  display: grid;
+  grid-template-columns: minmax(14rem, 20rem) minmax(0, 1fr);
+  gap: var(--space-5);
+  align-items: start;
+}
+
+.admin-page__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  /* Sticky so the editor scrolls independently of a long bank. */
+  position: sticky;
+  top: var(--space-4);
+  max-height: calc(100dvh - var(--space-8));
+  overflow-y: auto;
+}
+
+.admin-page__list-heading {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-subtle);
+  padding: var(--space-2) var(--space-2) var(--space-1);
+}
+
+.admin-page__main {
+  min-width: 0;
+}
+
+.admin-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: var(--space-4);
+}
+
+.admin-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.admin-list__title {
+  font-weight: 600;
+  /* Two lines then clip: an item stem can be a paragraph, and a list row that
+     grows to fit one destroys the scannability the list exists for. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/*
+ * The publication gate.
+ *
+ * Every unmet condition is listed, always — not just the first. An editor who
+ * fixes one blocker, saves, and is told about the next one has to make four
+ * round trips through a slow form to publish one item.
+ */
+.gate {
+  border-left: 3px solid var(--warning);
+}
+
+.gate__label {
+  font-weight: 600;
+  margin-bottom: var(--space-2);
+}
+
+.gate__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.gate__findings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+
+/* Pass and fail are never distinguished by colour alone (FR-A11Y-01). */
+.gate__marker {
+  display: inline-block;
+  min-width: 1.25rem;
+  font-family: var(--font-mono);
+  font-weight: 700;
+}
+
+.option-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.option-editor__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.option-editor__row {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: start;
+  padding: var(--space-3);
+  border: var(--border-hairline) solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+}
+
+.option-editor__preview {
+  padding: var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface-sunken);
+  min-height: var(--target-min);
+}
+
+/*
+ * The letter is authoring scaffolding and nothing else. Invariant 6: an answer
+ * is {question_version_id, option_id}, never a letter or a position, and
+ * options shuffle per candidate — so this label does not identify the option
+ * the student will see in that slot.
+ */
+.option__letter {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--fg-subtle);
+}
+
+.preview {
+  background: var(--surface-sunken);
+}
+
+.review-queue__options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-3) 0;
+}
+
+@media (max-width: 60rem) {
+  .admin-page--split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .admin-page__list {
+    position: static;
+    max-height: 22rem;
+  }
+}

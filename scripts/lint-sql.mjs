@@ -23,6 +23,8 @@
  *            hijacked by a schema the caller controls.
  *   IDX-001  A non-concurrent index build takes ACCESS EXCLUSIVE on the
  *            hottest table in the system and loses every in-flight attempt.
+ *            Exempt when the index targets a table the same migration created:
+ *            an uncommitted table has no other session to block.
  *
  * Usage:
  *   node scripts/lint-sql.mjs            lint the migration directory
@@ -80,6 +82,7 @@ export function lint(files) {
   }));
   const model = buildModel(parsedFiles);
   const maskedByFile = new Map(files.map(({ file, source }) => [file, mask(source)]));
+  const createdByFile = tablesCreatedPerFile(parsedFiles);
 
   // --- Table-level rules, resolved across the whole migration set. A later
   // --- migration is allowed to enable RLS on an earlier table.
@@ -202,7 +205,7 @@ export function lint(files) {
       }
     }
 
-    if (stmt.kind === 'index' && !stmt.concurrent) {
+    if (stmt.kind === 'index' && !stmt.concurrent && !createdByFile.get(stmt.file)?.has(qkey(stmt.name))) {
       const target = qkey(stmt.name);
       const fileTouchesHot = touchesHotTable(maskedByFile, stmt.file);
       if (HOT_TABLE_PATTERN.test(target)) {
@@ -277,6 +280,39 @@ function touchesHotTable(maskedByFile, file) {
   return masked ? HOT_TABLE_PATTERN.test(masked) : false;
 }
 
+/**
+ * Tables each file creates, keyed by file.
+ *
+ * IDX-001 and IDX-002 exist because a blocking index build takes ACCESS
+ * EXCLUSIVE on a table other sessions are using, and loses every in-flight
+ * attempt. Neither risk exists when the index targets a table the same
+ * migration just created: until that transaction commits, no other session can
+ * see the table, let alone contend for a lock on it.
+ *
+ * Without this carve-out the rules fire on the initial schema set — where every
+ * index is built beside its own CREATE TABLE — and the only way to silence them
+ * is to move the builds into a post-transaction migration using CONCURRENTLY.
+ * That is worse than the disease on both counts: CREATE INDEX CONCURRENTLY
+ * cannot run inside a transaction block, and Postgres rejects it outright on a
+ * partitioned table, which is what `attempt_response` and every other
+ * response-scale table here is. A gate whose only satisfying fix does not
+ * execute is a gate that gets switched off.
+ *
+ * The rules stay sharp for the case they were written for: adding an index to a
+ * table that already holds data.
+ */
+function tablesCreatedPerFile(parsedFiles) {
+  const byFile = new Map();
+  for (const { file, records } of parsedFiles) {
+    const created = new Set();
+    for (const r of records) {
+      if (r.kind === 'table') created.add(qkey(r.name));
+    }
+    byFile.set(file, created);
+  }
+  return byFile;
+}
+
 /** Convert a match index inside a statement back into a file location. */
 function offsetLoc(stmt, relIndex, files) {
   const entry = files.find((f) => f.file === stmt.file);
@@ -349,6 +385,20 @@ const FIXTURES = {
   indexBesideHotTable: `
     ALTER TABLE public.attempt ADD COLUMN sealed_at timestamptz;
     CREATE INDEX idx_profile_org ON public.profile (org_id);`,
+  indexOnTableCreatedHere: `
+    CREATE TABLE public.attempt_response (id uuid PRIMARY KEY, org_id uuid NOT NULL, attempt_id uuid NOT NULL);
+    ALTER TABLE public.attempt_response ENABLE ROW LEVEL SECURITY;
+    COMMENT ON TABLE public.attempt_response IS 'x';
+    CREATE POLICY r ON public.attempt_response FOR SELECT TO authenticated
+      USING (org_id = (select app.current_org_id()));
+    CREATE INDEX attempt_response_attempt_idx ON public.attempt_response (attempt_id);`,
+  indexOnPreexistingHotTable: `
+    CREATE TABLE public.note (id uuid PRIMARY KEY, org_id uuid NOT NULL);
+    ALTER TABLE public.note ENABLE ROW LEVEL SECURITY;
+    COMMENT ON TABLE public.note IS 'x';
+    CREATE POLICY n ON public.note FOR SELECT TO authenticated
+      USING (org_id = (select app.current_org_id()));
+    CREATE INDEX attempt_response_late_idx ON public.attempt_response (attempt_id);`,
   attemptOnlyInProse: `
     -- Every content policy gates on consent before a student may start an attempt.
     INSERT INTO private.permission (code, label) VALUES ('attempts.extend', 'Extend a deadline');
@@ -448,6 +498,14 @@ function runSelfTest() {
     {
       name: 'IDX-002 does not fire when "attempt" appears only in prose and string literals',
       assert: () => !rulesFired(FIXTURES.attemptOnlyInProse).has('IDX-002'),
+    },
+    {
+      name: 'IDX-001 does not fire on an index built beside its own CREATE TABLE',
+      assert: () => noFailures(FIXTURES.indexOnTableCreatedHere),
+    },
+    {
+      name: 'IDX-001 still fires on an index added to a hot table this file did not create',
+      assert: () => rulesFired(FIXTURES.indexOnPreexistingHotTable).has('IDX-001'),
     },
     {
       name: 'a private-schema table is not required to carry RLS policies',

@@ -145,8 +145,10 @@ function RunningAttempt(): JSX.Element {
 
   // Guard in-app navigation while the paper is live. The deadline does not
   // stop for a misclick (FR-ATT-09).
+  // The destination is deliberately not inspected: while the paper is live there
+  // is no in-app address worth losing seconds to, so every target is confirmed.
   const guard = useCallback(
-    (to: string) => {
+    (_to: string) => {
       if (status !== 'IN_PROGRESS') return true;
       return window.confirm(
         'Your paper is still running and the clock does not stop. Leave this page?',
